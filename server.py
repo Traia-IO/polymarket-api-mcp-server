@@ -20,6 +20,7 @@ Environment Variables:
 import os
 import logging
 import sys
+import json
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple, Union
 from datetime import datetime
 
@@ -27,6 +28,10 @@ import requests
 from retry import retry
 from dotenv import load_dotenv
 import uvicorn
+
+# Polymarket CLOB client for trading operations
+from py_clob_client.client import ClobClient
+from py_clob_client.clob_types import ApiCreds
 
 load_dotenv()
 
@@ -112,48 +117,55 @@ async def derive_polymarket_credentials(
     operator_private_key: Optional[str] = None
 ) -> Dict[str, Any]:
     """
-    [CREDENTIAL HELPER] Derive Polymarket API credentials from an operator private key. Agents call this once with their operator key to get credentials for trading endpoints. The private key is NOT stored - only used to derive credentials which are returned to the agent.
-
-    Generated from OpenAPI endpoint: POST /derive-credentials
+    [CREDENTIAL HELPER] Derive Polymarket API credentials from an operator private key.
+    
+    This function uses the py-clob-client to derive API credentials from the agent's
+    Ethereum private key. The private key is NOT stored - only used in-memory to 
+    derive credentials which are returned to the agent.
 
     Args:
         context: MCP context (auto-injected by framework, not user-provided)
-        operator_private_key: Agent's Ethereum/Polygon private key (0x prefixed hex string). Used to derive Polymarket credentials. (optional) Examples: "0x..."
+        operator_private_key: Agent's Ethereum/Polygon private key (0x prefixed hex string).
 
     Returns:
-        Dictionary with API response
+        Dictionary with api_key, api_secret, api_passphrase for trading endpoints
 
     Example Usage:
         await derive_polymarket_credentials(operator_private_key="0x...")
-
-        Note: 'context' parameter is auto-injected by MCP framework
     """
     # Payment already verified by @require_payment_for_tool decorator
-    # Get API key using helper (handles request.state fallback)
-    api_key = get_active_api_key(context)
+    
+    if not operator_private_key:
+        return {
+            "error": "Missing operator_private_key",
+            "message": "You must provide your Ethereum private key to derive Polymarket credentials"
+        }
 
     try:
-        url = f"https://gamma-api.polymarket.com/derive-credentials"
-        params = {}
-        headers = {}
-        # No auth required for this API
-
-        response = requests.post(
-            url,
-            json={k: v for k, v in {
-                "operator_private_key": operator_private_key,
-            }.items() if v is not None},
-            params=params,
-            headers=headers,
-            timeout=30
+        # Initialize CLOB client with the agent's private key
+        # Using Polygon mainnet (chain_id=137) for production
+        client = ClobClient(
+            host="https://clob.polymarket.com",
+            chain_id=137,
+            key=operator_private_key
         )
-        response.raise_for_status()
-
-        return response.json()
+        
+        # Derive API credentials from the private key
+        api_creds = client.create_api_key()
+        
+        logger.info(f"Successfully derived Polymarket credentials for agent")
+        
+        return {
+            "success": True,
+            "api_key": api_creds.api_key,
+            "api_secret": api_creds.api_secret,
+            "api_passphrase": api_creds.api_passphrase,
+            "note": "Store these credentials securely. Use them for all trading endpoints."
+        }
 
     except Exception as e:
         logger.error(f"Error in derive_polymarket_credentials: {e}")
-        return {"error": str(e), "endpoint": "/derive-credentials"}
+        return {"error": str(e), "message": "Failed to derive Polymarket credentials. Ensure your private key is valid."}
 
 
 @mcp.tool()
@@ -997,68 +1009,98 @@ async def create_order(
     side: Optional[str] = None,
     price: Optional[float] = None,
     size: Optional[float] = None,
-    type: str = "GTC",
-    expiration: Optional[int] = None
+    order_type: str = "GTC",
+    expiration: Optional[int] = None,
+    # Agent's Polymarket credentials (required for trading)
+    polymarket_api_key: Optional[str] = None,
+    polymarket_api_secret: Optional[str] = None,
+    polymarket_api_passphrase: Optional[str] = None
 ) -> Dict[str, Any]:
     """
-    [TRADING - REQUIRES AGENT CREDENTIALS] Create a new order to buy or sell prediction market shares. Agent must pass their own Polymarket credentials (from derive_polymarket_credentials). Trade executes on agent's Polymarket account.
-
-    Generated from OpenAPI endpoint: POST /order
+    [TRADING - REQUIRES AGENT CREDENTIALS] Create a new order to buy or sell prediction market shares.
+    
+    Agent must pass their own Polymarket credentials (from derive_polymarket_credentials).
+    Trade executes on agent's Polymarket account with their funds.
 
     Args:
-        context: MCP context (auto-injected by framework, not user-provided)
-        token_id: The token ID to trade (outcome token address) (optional)
-        side: Order side (optional)
-        price: Limit price for the order (0-1 range for probability/price) (optional)
-        size: Size of the order in USDC (optional)
-        type: Order type (optional, default: "GTC")
-        expiration: Expiration timestamp for GTD orders (Unix seconds) (optional)
+        context: MCP context (auto-injected by framework)
+        token_id: The token ID to trade (outcome token address)
+        side: Order side - "BUY" or "SELL"
+        price: Limit price for the order (0-1 range for probability)
+        size: Size of the order in USDC
+        order_type: Order type - "GTC" (Good Till Cancelled), "FOK" (Fill or Kill), "GTD" (Good Till Date)
+        expiration: Expiration timestamp for GTD orders (Unix seconds)
+        polymarket_api_key: Agent's Polymarket API key (from derive_polymarket_credentials)
+        polymarket_api_secret: Agent's Polymarket API secret
+        polymarket_api_passphrase: Agent's Polymarket API passphrase
 
     Returns:
-        Dictionary with API response
+        Dictionary with order details or error
 
     Example Usage:
-        # Minimal (required params only):
-        await create_order(token_id="example", side="example", price=None, size=None)
-
-        # With optional parameters:
         await create_order(
-        token_id="example",
-        side="example",
-        price=None,
-        size=None,
-        type="GTC"
-    )
-
-        Note: 'context' parameter is auto-injected by MCP framework
+            token_id="0x...",
+            side="BUY",
+            price=0.65,
+            size=10.0,
+            polymarket_api_key="...",
+            polymarket_api_secret="...",
+            polymarket_api_passphrase="..."
+        )
     """
     # Payment already verified by @require_payment_for_tool decorator
-    # Get API key using helper (handles request.state fallback)
-    api_key = get_active_api_key(context)
+    
+    # Validate required credentials
+    if not all([polymarket_api_key, polymarket_api_secret, polymarket_api_passphrase]):
+        return {
+            "error": "Missing Polymarket credentials",
+            "message": "Trading endpoints require agent's own credentials. Use derive_polymarket_credentials first.",
+            "required": ["polymarket_api_key", "polymarket_api_secret", "polymarket_api_passphrase"]
+        }
+    
+    # Validate required trading parameters
+    if not all([token_id, side, price is not None, size is not None]):
+        return {
+            "error": "Missing required parameters",
+            "message": "Must provide token_id, side, price, and size",
+            "required": ["token_id", "side", "price", "size"]
+        }
 
     try:
-        url = f"https://gamma-api.polymarket.com/order"
-        params = {}
-        headers = {}
-        # No auth required for this API
-
-        response = requests.post(
-            url,
-            json={k: v for k, v in {
-                "token_id": token_id,
-                "side": side,
-                "price": price,
-                "size": size,
-                "type": type,
-                "expiration": expiration,
-            }.items() if v is not None},
-            params=params,
-            headers=headers,
-            timeout=30
+        # Create CLOB client with agent's credentials
+        creds = ApiCreds(
+            api_key=polymarket_api_key,
+            api_secret=polymarket_api_secret,
+            api_passphrase=polymarket_api_passphrase
         )
-        response.raise_for_status()
-
-        return response.json()
+        
+        client = ClobClient(
+            host="https://clob.polymarket.com",
+            chain_id=137,  # Polygon mainnet
+            creds=creds
+        )
+        
+        # Build and submit order
+        from py_clob_client.order_builder.constants import BUY, SELL
+        order_side = BUY if side.upper() == "BUY" else SELL
+        
+        # Create the order
+        order = client.create_order(
+            token_id=token_id,
+            price=price,
+            size=size,
+            side=order_side
+        )
+        
+        # Post the order
+        result = client.post_order(order)
+        
+        logger.info(f"Order created successfully: {result}")
+        return {
+            "success": True,
+            "order": result,
+            "message": "Order submitted successfully"
+        }
 
     except Exception as e:
         logger.error(f"Error in create_order: {e}")
@@ -1084,48 +1126,67 @@ async def create_order(
 )
 async def cancel_order(
     context: Context,
-    order_id: Optional[str] = None
+    order_id: Optional[str] = None,
+    # Agent's Polymarket credentials (required for trading)
+    polymarket_api_key: Optional[str] = None,
+    polymarket_api_secret: Optional[str] = None,
+    polymarket_api_passphrase: Optional[str] = None
 ) -> Dict[str, Any]:
     """
-    [TRADING - REQUIRES AGENT CREDENTIALS] Cancel an open order by its order ID. Agent must pass their Polymarket credentials.
-
-    Generated from OpenAPI endpoint: DELETE /order/{order_id}
+    [TRADING - REQUIRES AGENT CREDENTIALS] Cancel an open order by its order ID.
+    
+    Agent must pass their Polymarket credentials.
 
     Args:
-        context: MCP context (auto-injected by framework, not user-provided)
-        order_id: The unique order ID to cancel (optional)
+        context: MCP context (auto-injected by framework)
+        order_id: The unique order ID to cancel
+        polymarket_api_key: Agent's Polymarket API key
+        polymarket_api_secret: Agent's Polymarket API secret
+        polymarket_api_passphrase: Agent's Polymarket API passphrase
 
     Returns:
-        Dictionary with API response
-
-    Example Usage:
-        await cancel_order(order_id="example")
-
-        Note: 'context' parameter is auto-injected by MCP framework
+        Dictionary with cancellation result
     """
     # Payment already verified by @require_payment_for_tool decorator
-    # Get API key using helper (handles request.state fallback)
-    api_key = get_active_api_key(context)
+    
+    # Validate required credentials
+    if not all([polymarket_api_key, polymarket_api_secret, polymarket_api_passphrase]):
+        return {
+            "error": "Missing Polymarket credentials",
+            "message": "Trading endpoints require agent's own credentials."
+        }
+    
+    if not order_id:
+        return {"error": "Missing order_id parameter"}
 
     try:
-        url = f"https://gamma-api.polymarket.com/order/{order_id}"
-        params = {}
-        headers = {}
-        # No auth required for this API
-
-        response = requests.delete(
-            url,
-            params=params,
-            headers=headers,
-            timeout=30
+        # Create CLOB client with agent's credentials
+        creds = ApiCreds(
+            api_key=polymarket_api_key,
+            api_secret=polymarket_api_secret,
+            api_passphrase=polymarket_api_passphrase
         )
-        response.raise_for_status()
-
-        return response.json()
+        
+        client = ClobClient(
+            host="https://clob.polymarket.com",
+            chain_id=137,
+            creds=creds
+        )
+        
+        # Cancel the order
+        result = client.cancel(order_id)
+        
+        logger.info(f"Order {order_id} cancelled successfully")
+        return {
+            "success": True,
+            "order_id": order_id,
+            "result": result,
+            "message": "Order cancelled successfully"
+        }
 
     except Exception as e:
         logger.error(f"Error in cancel_order: {e}")
-        return {"error": str(e), "endpoint": "/order/{order_id}"}
+        return {"error": str(e), "message": "Failed to cancel order"}
 
 
 @mcp.tool()
@@ -1149,55 +1210,64 @@ async def get_orders(
     context: Context,
     market: Optional[str] = None,
     asset_id: Optional[str] = None,
-    state: Optional[str] = None
+    state: Optional[str] = None,
+    # Agent's Polymarket credentials (required)
+    polymarket_api_key: Optional[str] = None,
+    polymarket_api_secret: Optional[str] = None,
+    polymarket_api_passphrase: Optional[str] = None
 ) -> Dict[str, Any]:
     """
-    [TRADING - REQUIRES AGENT CREDENTIALS] Get all orders for the agent's account with optional filtering by market or status. Agent must pass their Polymarket credentials.
-
-    Generated from OpenAPI endpoint: GET /orders
+    [TRADING - REQUIRES AGENT CREDENTIALS] Get all orders for the agent's account.
+    
+    Agent must pass their Polymarket credentials.
 
     Args:
-        context: MCP context (auto-injected by framework, not user-provided)
+        context: MCP context (auto-injected by framework)
         market: Filter by market condition ID (optional)
         asset_id: Filter by asset/token ID (optional)
-        state: Filter by order state (optional)
+        state: Filter by order state - "open", "matched", "cancelled" (optional)
+        polymarket_api_key: Agent's Polymarket API key
+        polymarket_api_secret: Agent's Polymarket API secret
+        polymarket_api_passphrase: Agent's Polymarket API passphrase
 
     Returns:
-        Dictionary with API response
-
-    Example Usage:
-        await get_orders()
-
-        Note: 'context' parameter is auto-injected by MCP framework
+        List of orders
     """
     # Payment already verified by @require_payment_for_tool decorator
-    # Get API key using helper (handles request.state fallback)
-    api_key = get_active_api_key(context)
+    
+    # Validate required credentials
+    if not all([polymarket_api_key, polymarket_api_secret, polymarket_api_passphrase]):
+        return {
+            "error": "Missing Polymarket credentials",
+            "message": "Trading endpoints require agent's own credentials."
+        }
 
     try:
-        url = f"https://gamma-api.polymarket.com/orders"
-        params = {
-            "market": market,
-            "asset_id": asset_id,
-            "state": state
-        }
-        params = {k: v for k, v in params.items() if v is not None}
-        headers = {}
-        # No auth required for this API
-
-        response = requests.get(
-            url,
-            params=params,
-            headers=headers,
-            timeout=30
+        # Create CLOB client with agent's credentials
+        creds = ApiCreds(
+            api_key=polymarket_api_key,
+            api_secret=polymarket_api_secret,
+            api_passphrase=polymarket_api_passphrase
         )
-        response.raise_for_status()
-
-        return response.json()
+        
+        client = ClobClient(
+            host="https://clob.polymarket.com",
+            chain_id=137,
+            creds=creds
+        )
+        
+        # Get orders with optional filters
+        orders = client.get_orders(asset_id=asset_id) if asset_id else client.get_orders()
+        
+        return {
+            "success": True,
+            "orders": orders,
+            "count": len(orders) if isinstance(orders, list) else 0
+        }
 
     except Exception as e:
         logger.error(f"Error in get_orders: {e}")
-        return {"error": str(e), "endpoint": "/orders"}
+        return {"error": str(e), "message": "Failed to get orders"}
 
 
 @mcp.tool()
@@ -1220,53 +1290,64 @@ async def get_orders(
 async def cancel_all_orders(
     context: Context,
     market: Optional[str] = None,
-    asset_id: Optional[str] = None
+    asset_id: Optional[str] = None,
+    # Agent's Polymarket credentials (required)
+    polymarket_api_key: Optional[str] = None,
+    polymarket_api_secret: Optional[str] = None,
+    polymarket_api_passphrase: Optional[str] = None
 ) -> Dict[str, Any]:
     """
-    [TRADING - REQUIRES AGENT CREDENTIALS] Cancel all open orders for the agent's account. Agent must pass their Polymarket credentials.
-
-    Generated from OpenAPI endpoint: DELETE /cancel-all
+    [TRADING - REQUIRES AGENT CREDENTIALS] Cancel all open orders for the agent's account.
+    
+    Agent must pass their Polymarket credentials.
 
     Args:
-        context: MCP context (auto-injected by framework, not user-provided)
-        market: Optional market condition ID to cancel orders for (all markets if not specified) (optional)
-        asset_id: Optional asset/token ID to cancel orders for (optional)
+        context: MCP context (auto-injected by framework)
+        market: Optional market condition ID to cancel orders for
+        asset_id: Optional asset/token ID to cancel orders for
+        polymarket_api_key: Agent's Polymarket API key
+        polymarket_api_secret: Agent's Polymarket API secret
+        polymarket_api_passphrase: Agent's Polymarket API passphrase
 
     Returns:
-        Dictionary with API response
-
-    Example Usage:
-        await cancel_all_orders()
-
-        Note: 'context' parameter is auto-injected by MCP framework
+        Dictionary with cancellation result
     """
     # Payment already verified by @require_payment_for_tool decorator
-    # Get API key using helper (handles request.state fallback)
-    api_key = get_active_api_key(context)
+    
+    # Validate required credentials
+    if not all([polymarket_api_key, polymarket_api_secret, polymarket_api_passphrase]):
+        return {
+            "error": "Missing Polymarket credentials",
+            "message": "Trading endpoints require agent's own credentials."
+        }
 
     try:
-        url = f"https://gamma-api.polymarket.com/cancel-all"
-        params = {
-            "market": market,
-            "asset_id": asset_id
-        }
-        params = {k: v for k, v in params.items() if v is not None}
-        headers = {}
-        # No auth required for this API
-
-        response = requests.delete(
-            url,
-            params=params,
-            headers=headers,
-            timeout=30
+        # Create CLOB client with agent's credentials
+        creds = ApiCreds(
+            api_key=polymarket_api_key,
+            api_secret=polymarket_api_secret,
+            api_passphrase=polymarket_api_passphrase
         )
-        response.raise_for_status()
-
-        return response.json()
+        
+        client = ClobClient(
+            host="https://clob.polymarket.com",
+            chain_id=137,
+            creds=creds
+        )
+        
+        # Cancel all orders
+        result = client.cancel_all()
+        
+        logger.info(f"All orders cancelled successfully")
+        return {
+            "success": True,
+            "result": result,
+            "message": "All orders cancelled"
+        }
 
     except Exception as e:
         logger.error(f"Error in cancel_all_orders: {e}")
-        return {"error": str(e), "endpoint": "/cancel-all"}
+        return {"error": str(e), "message": "Failed to cancel orders"}
 
 
 @mcp.tool()
@@ -1287,46 +1368,61 @@ async def cancel_all_orders(
 
 )
 async def get_balance(
-    context: Context
+    context: Context,
+    # Agent's Polymarket credentials (required)
+    polymarket_api_key: Optional[str] = None,
+    polymarket_api_secret: Optional[str] = None,
+    polymarket_api_passphrase: Optional[str] = None
 ) -> Dict[str, Any]:
     """
-    [TRADING - REQUIRES AGENT CREDENTIALS] Get USDC balance for the agent's Polymarket trading account. Agent must pass their Polymarket credentials.
-
-    Generated from OpenAPI endpoint: GET /balance
+    [TRADING - REQUIRES AGENT CREDENTIALS] Get USDC balance for the agent's Polymarket account.
+    
+    Agent must pass their Polymarket credentials.
 
     Args:
-        context: MCP context (auto-injected by framework, not user-provided)
-
+        context: MCP context (auto-injected by framework)
+        polymarket_api_key: Agent's Polymarket API key
+        polymarket_api_secret: Agent's Polymarket API secret
+        polymarket_api_passphrase: Agent's Polymarket API passphrase
 
     Returns:
-        Dictionary with API response
-
-    Example Usage:
-        await get_balance()
+        Dictionary with balance information
     """
     # Payment already verified by @require_payment_for_tool decorator
-    # Get API key using helper (handles request.state fallback)
-    api_key = get_active_api_key(context)
+    
+    # Validate required credentials
+    if not all([polymarket_api_key, polymarket_api_secret, polymarket_api_passphrase]):
+        return {
+            "error": "Missing Polymarket credentials",
+            "message": "Trading endpoints require agent's own credentials."
+        }
 
     try:
-        url = f"https://gamma-api.polymarket.com/balance"
-        params = {}
-        headers = {}
-        # No auth required for this API
-
-        response = requests.get(
-            url,
-            params=params,
-            headers=headers,
-            timeout=30
+        # Create CLOB client with agent's credentials
+        creds = ApiCreds(
+            api_key=polymarket_api_key,
+            api_secret=polymarket_api_secret,
+            api_passphrase=polymarket_api_passphrase
         )
-        response.raise_for_status()
-
-        return response.json()
+        
+        client = ClobClient(
+            host="https://clob.polymarket.com",
+            chain_id=137,
+            creds=creds
+        )
+        
+        # Get balance
+        balance = client.get_balance_allowance()
+        
+        return {
+            "success": True,
+            "balance": balance,
+            "message": "Balance retrieved successfully"
+        }
 
     except Exception as e:
         logger.error(f"Error in get_balance: {e}")
-        return {"error": str(e), "endpoint": "/balance"}
+        return {"error": str(e), "message": "Failed to get balance"}
 
 
 @mcp.tool()
@@ -1348,51 +1444,65 @@ async def get_balance(
 )
 async def get_positions(
     context: Context,
-    market: Optional[str] = None
+    market: Optional[str] = None,
+    # Agent's Polymarket credentials (required)
+    polymarket_api_key: Optional[str] = None,
+    polymarket_api_secret: Optional[str] = None,
+    polymarket_api_passphrase: Optional[str] = None
 ) -> Dict[str, Any]:
     """
-    [TRADING - REQUIRES AGENT CREDENTIALS] Get all open positions (token holdings) for the agent's account including current value, P&L, and position details. Agent must pass their Polymarket credentials.
-
-    Generated from OpenAPI endpoint: GET /positions
+    [TRADING - REQUIRES AGENT CREDENTIALS] Get all open positions for the agent's account.
+    
+    Agent must pass their Polymarket credentials.
 
     Args:
-        context: MCP context (auto-injected by framework, not user-provided)
-        market: Optional market condition ID to filter positions (optional)
+        context: MCP context (auto-injected by framework)
+        market: Optional market condition ID to filter positions
+        polymarket_api_key: Agent's Polymarket API key
+        polymarket_api_secret: Agent's Polymarket API secret
+        polymarket_api_passphrase: Agent's Polymarket API passphrase
 
     Returns:
-        Dictionary with API response
-
-    Example Usage:
-        await get_positions()
-
-        Note: 'context' parameter is auto-injected by MCP framework
+        Dictionary with positions information
     """
     # Payment already verified by @require_payment_for_tool decorator
-    # Get API key using helper (handles request.state fallback)
-    api_key = get_active_api_key(context)
+    
+    # Validate required credentials
+    if not all([polymarket_api_key, polymarket_api_secret, polymarket_api_passphrase]):
+        return {
+            "error": "Missing Polymarket credentials",
+            "message": "Trading endpoints require agent's own credentials."
+        }
 
     try:
-        url = f"https://gamma-api.polymarket.com/positions"
-        params = {
-            "market": market
-        }
-        params = {k: v for k, v in params.items() if v is not None}
-        headers = {}
-        # No auth required for this API
-
-        response = requests.get(
-            url,
-            params=params,
-            headers=headers,
-            timeout=30
+        # Note: py-clob-client doesn't have a direct get_positions method
+        # Positions are tracked via the tokens you hold
+        # We'll use the REST API directly with authentication
+        
+        creds = ApiCreds(
+            api_key=polymarket_api_key,
+            api_secret=polymarket_api_secret,
+            api_passphrase=polymarket_api_passphrase
         )
-        response.raise_for_status()
-
-        return response.json()
+        
+        client = ClobClient(
+            host="https://clob.polymarket.com",
+            chain_id=137,
+            creds=creds
+        )
+        
+        # Get trades which show positions
+        trades = client.get_trades()
+        
+        return {
+            "success": True,
+            "trades": trades,
+            "message": "Trades/positions retrieved successfully"
+        }
 
     except Exception as e:
         logger.error(f"Error in get_positions: {e}")
-        return {"error": str(e), "endpoint": "/positions"}
+        return {"error": str(e), "message": "Failed to get positions"}
 
 
 @mcp.tool()

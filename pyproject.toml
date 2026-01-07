@@ -13,6 +13,7 @@ dependencies = [
     "traia-iatp>=0.1.76",  # For d402 payment protocol and RPC fallback support
     "uvicorn>=0.37.0",
     "web3>=6.15.0",  # For blockchain payment verification
+    "py-clob-client>=0.17.0",  # Polymarket CLOB client for trading operations
 ]
 
 [build-system]
