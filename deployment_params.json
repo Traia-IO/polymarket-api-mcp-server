@@ -1,0 +1,45 @@
+{
+  "github_url": "https://github.com/Traia-IO/polymarket-api-mcp-server",
+  "mcp_server": {
+    "name": "polymarket-api-mcp",
+    "description": "Polymarket prediction market api - access market data, prices, probabilities, and trading for prediction markets",
+    "server_type": "streamable-http",
+    "requires_api_key": false,
+    "capabilities": [
+      "derive_polymarket_credentials",
+      "list_markets",
+      "get_market",
+      "list_events",
+      "get_event",
+      "get_prices",
+      "get_price_history",
+      "get_orderbook",
+      "get_midpoint",
+      "get_spread",
+      "get_trades",
+      "get_timeseries",
+      "create_order",
+      "cancel_order",
+      "get_orders",
+      "cancel_all_orders",
+      "get_balance",
+      "get_positions",
+      "search_markets",
+      "get_tags",
+      "get_rewards",
+      "get_notification_preferences"
+    ],
+    "payment_protocol": "402",
+    "dual_mode": true,
+    "dual_mode_description": "Supports both authenticated (free with API key) and payment (402 protocol) modes"
+  },
+  "deployment_method": "cloud_run",
+  "gcp_project_id": "traia-mcp-servers",
+  "gcp_region": "us-central1",
+  "tags": [
+    "polymarket api",
+    "api",
+    "mcp"
+  ],
+  "ref": "main"
+}
