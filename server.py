@@ -1597,7 +1597,7 @@ async def search_markets(
 )
 async def get_tags(
     context: Context
-) -> Union[List[str], Dict[str, Any]]:
+) -> Union[List[Dict[str, Any]], Dict[str, Any]]:
     """
     Get list of all available market tags/categories for filtering markets (e.g., 'politics', 'crypto', 'sports', 'entertainment').
 
