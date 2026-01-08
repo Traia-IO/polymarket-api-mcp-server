@@ -195,7 +195,7 @@ async def list_markets(
     closed: bool = False,
     tag: Optional[str] = None,
     slug: Optional[str] = None
-) -> Dict[str, Any]:
+) -> Union[List[Dict[str, Any]], Dict[str, Any]]:
     """
     List all available prediction markets on Polymarket with filtering and pagination options. Returns market details including question, outcomes, liquidity, and trading data.
 
@@ -351,7 +351,7 @@ async def list_events(
     ascending: bool = False,
     active: bool = True,
     tag: Optional[str] = None
-) -> Dict[str, Any]:
+) -> Union[List[Dict[str, Any]], Dict[str, Any]]:
     """
     List all events on Polymarket. Events group related prediction markets together (e.g., 'US 2024 Presidential Election' event contains multiple markets).
 
@@ -851,7 +851,7 @@ async def get_trades(
     limit: int = 100,
     before: Optional[str] = None,
     after: Optional[str] = None
-) -> Dict[str, Any]:
+) -> Union[List[Dict[str, Any]], Dict[str, Any]]:
     """
     Get recent trade history for a market showing executed transactions with prices, sizes, and timestamps.
 
@@ -1526,7 +1526,7 @@ async def search_markets(
     context: Context,
     query: Optional[str] = None,
     limit: int = 20
-) -> Dict[str, Any]:
+) -> Union[List[Dict[str, Any]], Dict[str, Any]]:
     """
     Search for markets by keyword. Useful for finding specific prediction markets by topic, name, or related terms.
 
@@ -1597,7 +1597,7 @@ async def search_markets(
 )
 async def get_tags(
     context: Context
-) -> Dict[str, Any]:
+) -> Union[List[str], Dict[str, Any]]:
     """
     Get list of all available market tags/categories for filtering markets (e.g., 'politics', 'crypto', 'sports', 'entertainment').
 
