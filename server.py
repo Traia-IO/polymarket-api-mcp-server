@@ -57,9 +57,10 @@ from traia_iatp.d402.types import TokenAmount, TokenAsset, EIP712Domain
 # Configuration
 STAGE = os.getenv("STAGE", "MAINNET").upper()
 PORT = int(os.getenv("PORT", "8000"))
-SERVER_ADDRESS = os.getenv("SERVER_ADDRESS")
-if not SERVER_ADDRESS:
+_server_address = os.getenv("SERVER_ADDRESS")
+if not _server_address:
     raise ValueError("SERVER_ADDRESS required for payment protocol")
+SERVER_ADDRESS: str = _server_address  # Type assertion after validation
 
 API_KEY = None
 
@@ -1434,12 +1435,11 @@ async def get_balance(
         }
 
     try:
-        # Create CLOB client with agent's credentials
-        # Type assertions after validation
+        
         assert polymarket_api_key is not None
         assert polymarket_api_secret is not None
         assert polymarket_api_passphrase is not None
-        
+        # Create CLOB client with agent's credentials
         creds = ApiCreds(
             api_key=polymarket_api_key,
             api_secret=polymarket_api_secret,
@@ -1519,7 +1519,9 @@ async def get_positions(
         # Note: py-clob-client doesn't have a direct get_positions method
         # Positions are tracked via the tokens you hold
         # We'll use the REST API directly with authentication
-        
+        assert polymarket_api_key is not None
+        assert polymarket_api_secret is not None
+        assert polymarket_api_passphrase is not None
         creds = ApiCreds(
             api_key=polymarket_api_key,
             api_secret=polymarket_api_secret,
