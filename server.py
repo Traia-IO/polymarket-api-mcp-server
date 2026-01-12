@@ -144,14 +144,17 @@ async def derive_polymarket_credentials(
     try:
         # Initialize CLOB client with the agent's private key
         # Using Polygon mainnet (chain_id=137) for production
+        # signature_type=2 for EOA wallets
         client = ClobClient(
             host="https://clob.polymarket.com",
             chain_id=137,
-            key=operator_private_key
+            key=operator_private_key,
+            signature_type=2  # EOA signature type
         )
         
         # Derive API credentials from the private key
-        api_creds = client.create_api_key()
+        # Use derive_api_key() which works for registered accounts
+        api_creds = client.derive_api_key()
         
         logger.info(f"Successfully derived Polymarket credentials for agent")
         
