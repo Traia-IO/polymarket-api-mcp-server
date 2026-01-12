@@ -1176,6 +1176,11 @@ async def cancel_order(
         return {"error": "Missing order_id parameter"}
 
     try:
+        # Type assertions after validation
+        assert polymarket_api_key is not None
+        assert polymarket_api_secret is not None
+        assert polymarket_api_passphrase is not None
+        
         # Create CLOB client with agent's credentials
         creds = ApiCreds(
             api_key=polymarket_api_key,
@@ -1259,6 +1264,11 @@ async def get_orders(
         }
 
     try:
+        # Type assertions after validation
+        assert polymarket_api_key is not None
+        assert polymarket_api_secret is not None
+        assert polymarket_api_passphrase is not None
+        
         # Create CLOB client with agent's credentials
         creds = ApiCreds(
             api_key=polymarket_api_key,
@@ -1343,6 +1353,11 @@ async def cancel_all_orders(
         }
 
     try:
+        # Type assertions after validation
+        assert polymarket_api_key is not None
+        assert polymarket_api_secret is not None
+        assert polymarket_api_passphrase is not None
+        
         # Create CLOB client with agent's credentials
         creds = ApiCreds(
             api_key=polymarket_api_key,
@@ -1420,6 +1435,11 @@ async def get_balance(
 
     try:
         # Create CLOB client with agent's credentials
+        # Type assertions after validation
+        assert polymarket_api_key is not None
+        assert polymarket_api_secret is not None
+        assert polymarket_api_passphrase is not None
+        
         creds = ApiCreds(
             api_key=polymarket_api_key,
             api_secret=polymarket_api_secret,
