@@ -1070,6 +1070,15 @@ async def create_order(
         }
 
     try:
+        # Type assertions after validation (values guaranteed non-None by check above)
+        assert polymarket_api_key is not None
+        assert polymarket_api_secret is not None
+        assert polymarket_api_passphrase is not None
+        assert token_id is not None
+        assert side is not None
+        assert price is not None
+        assert size is not None
+        
         # Create CLOB client with agent's credentials
         creds = ApiCreds(
             api_key=polymarket_api_key,
@@ -1083,17 +1092,21 @@ async def create_order(
             creds=creds
         )
         
-        # Build and submit order
+        # Build and submit order using OrderArgs
+        from py_clob_client.clob_types import OrderArgs
         from py_clob_client.order_builder.constants import BUY, SELL
         order_side = BUY if side.upper() == "BUY" else SELL
         
-        # Create the order
-        order = client.create_order(
+        # Create OrderArgs object
+        order_args = OrderArgs(
             token_id=token_id,
-            price=price,
-            size=size,
+            price=float(price),
+            size=float(size),
             side=order_side
         )
+        
+        # Create the order
+        order = client.create_order(order_args)
         
         # Post the order
         result = client.post_order(order)
@@ -1260,7 +1273,12 @@ async def get_orders(
         )
         
         # Get orders with optional filters
-        orders = client.get_orders(asset_id=asset_id) if asset_id else client.get_orders()
+        from py_clob_client.clob_types import OpenOrderParams
+        if asset_id:
+            params = OpenOrderParams(asset_id=asset_id)
+            orders = client.get_orders(params)
+        else:
+            orders = client.get_orders()
         
         return {
             "success": True,
