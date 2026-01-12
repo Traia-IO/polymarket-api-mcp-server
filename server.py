@@ -1018,12 +1018,13 @@ async def create_order(
     # Agent's Polymarket credentials (required for trading)
     polymarket_api_key: Optional[str] = None,
     polymarket_api_secret: Optional[str] = None,
-    polymarket_api_passphrase: Optional[str] = None
+    polymarket_api_passphrase: Optional[str] = None,
+    operator_private_key: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     [TRADING - REQUIRES AGENT CREDENTIALS] Create a new order to buy or sell prediction market shares.
     
-    Agent must pass their own Polymarket credentials (from derive_polymarket_credentials).
+    Agent must pass their own Polymarket credentials AND private key.
     Trade executes on agent's Polymarket account with their funds.
 
     Args:
@@ -1037,6 +1038,7 @@ async def create_order(
         polymarket_api_key: Agent's Polymarket API key (from derive_polymarket_credentials)
         polymarket_api_secret: Agent's Polymarket API secret
         polymarket_api_passphrase: Agent's Polymarket API passphrase
+        operator_private_key: Agent's private key (for signing orders)
 
     Returns:
         Dictionary with order details or error
@@ -1049,17 +1051,18 @@ async def create_order(
             size=10.0,
             polymarket_api_key="...",
             polymarket_api_secret="...",
-            polymarket_api_passphrase="..."
+            polymarket_api_passphrase="...",
+            operator_private_key="0x..."
         )
     """
     # Payment already verified by @require_payment_for_tool decorator
     
     # Validate required credentials
-    if not all([polymarket_api_key, polymarket_api_secret, polymarket_api_passphrase]):
+    if not all([polymarket_api_key, polymarket_api_secret, polymarket_api_passphrase, operator_private_key]):
         return {
             "error": "Missing Polymarket credentials",
-            "message": "Trading endpoints require agent's own credentials. Use derive_polymarket_credentials first.",
-            "required": ["polymarket_api_key", "polymarket_api_secret", "polymarket_api_passphrase"]
+            "message": "Trading endpoints require agent's credentials AND private key.",
+            "required": ["polymarket_api_key", "polymarket_api_secret", "polymarket_api_passphrase", "operator_private_key"]
         }
     
     # Validate required trading parameters
@@ -1075,12 +1078,13 @@ async def create_order(
         assert polymarket_api_key is not None
         assert polymarket_api_secret is not None
         assert polymarket_api_passphrase is not None
+        assert operator_private_key is not None
         assert token_id is not None
         assert side is not None
         assert price is not None
         assert size is not None
         
-        # Create CLOB client with agent's credentials
+        # Create CLOB client with agent's credentials AND private key
         creds = ApiCreds(
             api_key=polymarket_api_key,
             api_secret=polymarket_api_secret,
@@ -1090,7 +1094,9 @@ async def create_order(
         client = ClobClient(
             host="https://clob.polymarket.com",
             chain_id=137,  # Polygon mainnet
-            creds=creds
+            key=operator_private_key,
+            creds=creds,
+            signature_type=2  # EOA signature
         )
         
         # Build and submit order using OrderArgs
@@ -1147,12 +1153,13 @@ async def cancel_order(
     # Agent's Polymarket credentials (required for trading)
     polymarket_api_key: Optional[str] = None,
     polymarket_api_secret: Optional[str] = None,
-    polymarket_api_passphrase: Optional[str] = None
+    polymarket_api_passphrase: Optional[str] = None,
+    operator_private_key: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     [TRADING - REQUIRES AGENT CREDENTIALS] Cancel an open order by its order ID.
     
-    Agent must pass their Polymarket credentials.
+    Agent must pass their Polymarket credentials AND private key.
 
     Args:
         context: MCP context (auto-injected by framework)
@@ -1160,6 +1167,7 @@ async def cancel_order(
         polymarket_api_key: Agent's Polymarket API key
         polymarket_api_secret: Agent's Polymarket API secret
         polymarket_api_passphrase: Agent's Polymarket API passphrase
+        operator_private_key: Agent's private key (for signing requests)
 
     Returns:
         Dictionary with cancellation result
@@ -1167,10 +1175,10 @@ async def cancel_order(
     # Payment already verified by @require_payment_for_tool decorator
     
     # Validate required credentials
-    if not all([polymarket_api_key, polymarket_api_secret, polymarket_api_passphrase]):
+    if not all([polymarket_api_key, polymarket_api_secret, polymarket_api_passphrase, operator_private_key]):
         return {
             "error": "Missing Polymarket credentials",
-            "message": "Trading endpoints require agent's own credentials."
+            "message": "Trading endpoints require agent's credentials AND private key."
         }
     
     if not order_id:
@@ -1181,8 +1189,9 @@ async def cancel_order(
         assert polymarket_api_key is not None
         assert polymarket_api_secret is not None
         assert polymarket_api_passphrase is not None
+        assert operator_private_key is not None
         
-        # Create CLOB client with agent's credentials
+        # Create CLOB client with agent's credentials AND private key
         creds = ApiCreds(
             api_key=polymarket_api_key,
             api_secret=polymarket_api_secret,
@@ -1192,7 +1201,9 @@ async def cancel_order(
         client = ClobClient(
             host="https://clob.polymarket.com",
             chain_id=137,
-            creds=creds
+            key=operator_private_key,
+            creds=creds,
+            signature_type=2  # EOA signature
         )
         
         # Cancel the order
@@ -1236,12 +1247,13 @@ async def get_orders(
     # Agent's Polymarket credentials (required)
     polymarket_api_key: Optional[str] = None,
     polymarket_api_secret: Optional[str] = None,
-    polymarket_api_passphrase: Optional[str] = None
+    polymarket_api_passphrase: Optional[str] = None,
+    operator_private_key: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     [TRADING - REQUIRES AGENT CREDENTIALS] Get all orders for the agent's account.
     
-    Agent must pass their Polymarket credentials.
+    Agent must pass their Polymarket credentials AND private key.
 
     Args:
         context: MCP context (auto-injected by framework)
@@ -1251,6 +1263,7 @@ async def get_orders(
         polymarket_api_key: Agent's Polymarket API key
         polymarket_api_secret: Agent's Polymarket API secret
         polymarket_api_passphrase: Agent's Polymarket API passphrase
+        operator_private_key: Agent's private key (for signing requests)
 
     Returns:
         List of orders
@@ -1258,10 +1271,10 @@ async def get_orders(
     # Payment already verified by @require_payment_for_tool decorator
     
     # Validate required credentials
-    if not all([polymarket_api_key, polymarket_api_secret, polymarket_api_passphrase]):
+    if not all([polymarket_api_key, polymarket_api_secret, polymarket_api_passphrase, operator_private_key]):
         return {
             "error": "Missing Polymarket credentials",
-            "message": "Trading endpoints require agent's own credentials."
+            "message": "Trading endpoints require agent's credentials AND private key."
         }
 
     try:
@@ -1269,8 +1282,9 @@ async def get_orders(
         assert polymarket_api_key is not None
         assert polymarket_api_secret is not None
         assert polymarket_api_passphrase is not None
+        assert operator_private_key is not None
         
-        # Create CLOB client with agent's credentials
+        # Create CLOB client with agent's credentials AND private key
         creds = ApiCreds(
             api_key=polymarket_api_key,
             api_secret=polymarket_api_secret,
@@ -1280,7 +1294,9 @@ async def get_orders(
         client = ClobClient(
             host="https://clob.polymarket.com",
             chain_id=137,
-            creds=creds
+            key=operator_private_key,
+            creds=creds,
+            signature_type=2  # EOA signature
         )
         
         # Get orders with optional filters
@@ -1326,12 +1342,13 @@ async def cancel_all_orders(
     # Agent's Polymarket credentials (required)
     polymarket_api_key: Optional[str] = None,
     polymarket_api_secret: Optional[str] = None,
-    polymarket_api_passphrase: Optional[str] = None
+    polymarket_api_passphrase: Optional[str] = None,
+    operator_private_key: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     [TRADING - REQUIRES AGENT CREDENTIALS] Cancel all open orders for the agent's account.
     
-    Agent must pass their Polymarket credentials.
+    Agent must pass their Polymarket credentials AND private key.
 
     Args:
         context: MCP context (auto-injected by framework)
@@ -1340,6 +1357,7 @@ async def cancel_all_orders(
         polymarket_api_key: Agent's Polymarket API key
         polymarket_api_secret: Agent's Polymarket API secret
         polymarket_api_passphrase: Agent's Polymarket API passphrase
+        operator_private_key: Agent's private key (for signing requests)
 
     Returns:
         Dictionary with cancellation result
@@ -1347,10 +1365,10 @@ async def cancel_all_orders(
     # Payment already verified by @require_payment_for_tool decorator
     
     # Validate required credentials
-    if not all([polymarket_api_key, polymarket_api_secret, polymarket_api_passphrase]):
+    if not all([polymarket_api_key, polymarket_api_secret, polymarket_api_passphrase, operator_private_key]):
         return {
             "error": "Missing Polymarket credentials",
-            "message": "Trading endpoints require agent's own credentials."
+            "message": "Trading endpoints require agent's credentials AND private key."
         }
 
     try:
@@ -1358,8 +1376,9 @@ async def cancel_all_orders(
         assert polymarket_api_key is not None
         assert polymarket_api_secret is not None
         assert polymarket_api_passphrase is not None
+        assert operator_private_key is not None
         
-        # Create CLOB client with agent's credentials
+        # Create CLOB client with agent's credentials AND private key
         creds = ApiCreds(
             api_key=polymarket_api_key,
             api_secret=polymarket_api_secret,
@@ -1369,7 +1388,9 @@ async def cancel_all_orders(
         client = ClobClient(
             host="https://clob.polymarket.com",
             chain_id=137,
-            creds=creds
+            key=operator_private_key,
+            creds=creds,
+            signature_type=2  # EOA signature
         )
         
         # Cancel all orders
@@ -1409,18 +1430,20 @@ async def get_balance(
     # Agent's Polymarket credentials (required)
     polymarket_api_key: Optional[str] = None,
     polymarket_api_secret: Optional[str] = None,
-    polymarket_api_passphrase: Optional[str] = None
+    polymarket_api_passphrase: Optional[str] = None,
+    operator_private_key: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     [TRADING - REQUIRES AGENT CREDENTIALS] Get USDC balance for the agent's Polymarket account.
     
-    Agent must pass their Polymarket credentials.
+    Agent must pass their Polymarket credentials AND private key.
 
     Args:
         context: MCP context (auto-injected by framework)
         polymarket_api_key: Agent's Polymarket API key
         polymarket_api_secret: Agent's Polymarket API secret
         polymarket_api_passphrase: Agent's Polymarket API passphrase
+        operator_private_key: Agent's private key (for signing requests)
 
     Returns:
         Dictionary with balance information
@@ -1428,18 +1451,19 @@ async def get_balance(
     # Payment already verified by @require_payment_for_tool decorator
     
     # Validate required credentials
-    if not all([polymarket_api_key, polymarket_api_secret, polymarket_api_passphrase]):
+    if not all([polymarket_api_key, polymarket_api_secret, polymarket_api_passphrase, operator_private_key]):
         return {
             "error": "Missing Polymarket credentials",
-            "message": "Trading endpoints require agent's own credentials."
+            "message": "Trading endpoints require agent's credentials AND private key."
         }
 
     try:
-        
         assert polymarket_api_key is not None
         assert polymarket_api_secret is not None
         assert polymarket_api_passphrase is not None
-        # Create CLOB client with agent's credentials
+        assert operator_private_key is not None
+        
+        # Create CLOB client with agent's credentials AND private key
         creds = ApiCreds(
             api_key=polymarket_api_key,
             api_secret=polymarket_api_secret,
@@ -1449,7 +1473,9 @@ async def get_balance(
         client = ClobClient(
             host="https://clob.polymarket.com",
             chain_id=137,
-            creds=creds
+            key=operator_private_key,
+            creds=creds,
+            signature_type=2  # EOA signature
         )
         
         # Get balance
@@ -1489,12 +1515,13 @@ async def get_positions(
     # Agent's Polymarket credentials (required)
     polymarket_api_key: Optional[str] = None,
     polymarket_api_secret: Optional[str] = None,
-    polymarket_api_passphrase: Optional[str] = None
+    polymarket_api_passphrase: Optional[str] = None,
+    operator_private_key: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     [TRADING - REQUIRES AGENT CREDENTIALS] Get all open positions for the agent's account.
     
-    Agent must pass their Polymarket credentials.
+    Agent must pass their Polymarket credentials AND private key.
 
     Args:
         context: MCP context (auto-injected by framework)
@@ -1502,6 +1529,7 @@ async def get_positions(
         polymarket_api_key: Agent's Polymarket API key
         polymarket_api_secret: Agent's Polymarket API secret
         polymarket_api_passphrase: Agent's Polymarket API passphrase
+        operator_private_key: Agent's private key (for signing requests)
 
     Returns:
         Dictionary with positions information
@@ -1509,10 +1537,10 @@ async def get_positions(
     # Payment already verified by @require_payment_for_tool decorator
     
     # Validate required credentials
-    if not all([polymarket_api_key, polymarket_api_secret, polymarket_api_passphrase]):
+    if not all([polymarket_api_key, polymarket_api_secret, polymarket_api_passphrase, operator_private_key]):
         return {
             "error": "Missing Polymarket credentials",
-            "message": "Trading endpoints require agent's own credentials."
+            "message": "Trading endpoints require agent's credentials AND private key."
         }
 
     try:
@@ -1522,6 +1550,8 @@ async def get_positions(
         assert polymarket_api_key is not None
         assert polymarket_api_secret is not None
         assert polymarket_api_passphrase is not None
+        assert operator_private_key is not None
+        
         creds = ApiCreds(
             api_key=polymarket_api_key,
             api_secret=polymarket_api_secret,
@@ -1531,7 +1561,9 @@ async def get_positions(
         client = ClobClient(
             host="https://clob.polymarket.com",
             chain_id=137,
-            creds=creds
+            key=operator_private_key,
+            creds=creds,
+            signature_type=2  # EOA signature
         )
         
         # Get trades which show positions
