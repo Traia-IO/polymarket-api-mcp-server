@@ -384,7 +384,10 @@ async def list_events(
     order: str = "volume",
     ascending: bool = False,
     active: bool = True,
-    tag: Optional[str] = None
+    closed: bool = False,
+    tag: Optional[str] = None,
+    tag_id: Optional[int] = None,
+    series_id: Optional[int] = None
 ) -> Union[List[Dict[str, Any]], Dict[str, Any]]:
     """
     List all events on Polymarket. Events group related prediction markets together (e.g., 'US 2024 Presidential Election' event contains multiple markets).
@@ -395,24 +398,29 @@ async def list_events(
         context: MCP context (auto-injected by framework, not user-provided)
         limit: Maximum number of events to return (optional, default: 100)
         offset: Offset for pagination (optional, default: 0)
-        order: Sort order (optional, default: "volume")
+        order: Sort order - 'volume', 'startTime', 'endDate' (optional, default: "volume")
         ascending: Sort in ascending order (optional, default: False)
         active: Filter for active events only (optional, default: True)
-        tag: Filter by category tag (optional)
+        closed: Filter for closed events only (optional, default: False)
+        tag: Filter by category tag name (optional)
+        tag_id: Filter by numeric tag ID (e.g., 100639 for game bets). Use get_tags to find tag IDs (optional)
+        series_id: Filter by sports league/series ID. Use list_sports to find series IDs (optional)
 
     Returns:
-        Dictionary with API response
+        List of events matching the filters
 
     Example Usage:
-        # Minimal (required params only):
-        await list_events()
+        # Get all active events:
+        await list_events(active=True, closed=False)
 
-        # With optional parameters:
-        await list_events(
-        limit=100,
-        offset=0,
-        order="volume"
-    )
+        # Get NBA games using series_id from list_sports():
+        await list_events(series_id=10345, active=True, closed=False)
+
+        # Filter to just game bets (not futures) using tag_id:
+        await list_events(series_id=10345, tag_id=100639, active=True, closed=False, order="startTime", ascending=True)
+
+        # Get crypto events by tag name:
+        await list_events(tag="crypto", active=True)
 
         Note: 'context' parameter is auto-injected by MCP framework
     """
@@ -428,7 +436,10 @@ async def list_events(
             "order": order,
             "ascending": str(ascending).lower(),
             "active": str(active).lower(),
-            "tag": tag
+            "closed": str(closed).lower(),
+            "tag": tag,
+            "tag_id": tag_id,
+            "series_id": series_id
         }
         params = {k: v for k, v in params.items() if v is not None}
         headers = {}
@@ -1490,10 +1501,14 @@ async def get_tags(
 
 
     Returns:
-        Dictionary with API response
+        List of available tags with their IDs, labels, and slugs
 
     Example Usage:
+        # Get all tags
         await get_tags()
+
+        # Then use tag_id to filter events:
+        # await list_events(tag_id=100639)  # 100639 = game bets
     """
     # Payment already verified by @require_payment_for_tool decorator
     # Get API key using helper (handles request.state fallback)
@@ -1518,6 +1533,87 @@ async def get_tags(
     except Exception as e:
         logger.error(f"Error in get_tags: {e}")
         return {"error": str(e), "endpoint": "/tags"}
+
+
+@mcp.tool()
+@require_payment_for_tool(
+    price=TokenAmount(
+        amount="50000000000000",  # 5e-05 tokens
+        asset=TokenAsset(
+            address="0x3e17730bb2ca51a8D5deD7E44c003A2e95a4d822",
+            decimals=6,
+            network="sepolia",
+            eip712=EIP712Domain(
+                name="IATPWallet",
+                version="1"
+            )
+        )
+    ),
+    description="Get list of all supported sports leagues with their series IDs"
+
+)
+async def list_sports(
+    context: Context
+) -> Union[List[Dict[str, Any]], Dict[str, Any]]:
+    """
+    Get list of all supported sports leagues on Polymarket with their series IDs.
+    
+    Use this to discover sports leagues, then use the series_id with list_events()
+    to filter events for a specific league.
+
+    Generated from OpenAPI endpoint: GET /sports
+
+    Args:
+        context: MCP context (auto-injected by framework, not user-provided)
+
+    Returns:
+        List of sports leagues with:
+        - id: Internal sport ID
+        - sport: Sport code (e.g., 'nba', 'nfl', 'epl')
+        - series: Series ID to use with list_events(series_id=X)
+        - tags: Comma-separated tag IDs associated with this sport
+        - image: League logo URL
+        - resolution: Official result source URL
+
+    Example Usage:
+        # Get all sports leagues
+        sports = await list_sports()
+        
+        # Find NBA series_id (e.g., 10345)
+        nba = next(s for s in sports if s['sport'] == 'nba')
+        
+        # Then get NBA events:
+        # await list_events(series_id=nba['series'], active=True, closed=False)
+        
+        # Filter to just game bets (not futures) using tag_id=100639:
+        # await list_events(series_id=nba['series'], tag_id=100639, order='startTime', ascending=True)
+    
+    Note: /sports only returns automated leagues. For others (UFC, Boxing, F1, Golf, Chess),
+    use tag IDs via list_events(tag_id=X).
+    """
+    # Payment already verified by @require_payment_for_tool decorator
+    # Get API key using helper (handles request.state fallback)
+    api_key = get_active_api_key(context)
+
+    try:
+        url = f"https://gamma-api.polymarket.com/sports"
+        params = {}
+        headers = {}
+        # No auth required for this API
+
+        response = requests.get(
+            url,
+            params=params,
+            headers=headers,
+            timeout=30
+        )
+        response.raise_for_status()
+
+        return response.json()
+
+    except Exception as e:
+        logger.error(f"Error in list_sports: {e}")
+        return {"error": str(e), "endpoint": "/sports"}
 
 
 @mcp.tool()
