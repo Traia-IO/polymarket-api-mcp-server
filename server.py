@@ -31,7 +31,7 @@ import uvicorn
 
 # Polymarket CLOB client for trading operations
 from py_clob_client.client import ClobClient
-from py_clob_client.clob_types import ApiCreds
+from py_clob_client.clob_types import ApiCreds, BalanceAllowanceParams, AssetType
 
 load_dotenv()
 
@@ -47,6 +47,7 @@ from mcp.server.fastmcp import FastMCP, Context
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.middleware.cors import CORSMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
 
 # D402 payment protocol - using Starlette middleware
 from traia_iatp.d402.starlette_middleware import D402PaymentMiddleware
@@ -94,7 +95,156 @@ logger.info(f"✅ FastMCP server created")
 # No custom implementation needed!
 
 
+# ============================================================================
+# SESSION CREDENTIAL STORE
+# ============================================================================
+# Thread-safe storage for session-scoped Polymarket credentials.
+# Credentials are derived once when client sends X-Polymarket-Key header
+# and cached for the duration of the MCP session.
+
+from threading import Lock
+
+class SessionCredentialStore:
+    """Thread-safe store for session-scoped Polymarket credentials."""
+    
+    def __init__(self):
+        self._credentials: Dict[str, Dict[str, Any]] = {}
+        self._lock = Lock()
+    
+    def store(self, session_id: str, creds: ApiCreds, private_key: str) -> None:
+        """Store credentials for a session."""
+        with self._lock:
+            self._credentials[session_id] = {"creds": creds, "key": private_key}
+            logger.info(f"🔐 Stored Polymarket credentials for session {session_id[:8]}...")
+    
+    def get(self, session_id: str) -> Optional[Dict[str, Any]]:
+        """Get credentials for a session."""
+        with self._lock:
+            return self._credentials.get(session_id)
+    
+    def clear(self, session_id: str) -> None:
+        """Clear credentials for a session."""
+        with self._lock:
+            if session_id in self._credentials:
+                del self._credentials[session_id]
+                logger.info(f"🗑️ Cleared Polymarket credentials for session {session_id[:8]}...")
+    
+    def has_credentials(self, session_id: str) -> bool:
+        """Check if credentials exist for a session."""
+        with self._lock:
+            return session_id in self._credentials
+
+
+# Global session store instance
+session_credential_store = SessionCredentialStore()
+
+
+# ============================================================================
+# POLYMARKET AUTH MIDDLEWARE
+# ============================================================================
+# Intercepts requests with X-Polymarket-Key header and derives/caches credentials
+
+class PolymarketAuthMiddleware(BaseHTTPMiddleware):
+    """
+    Middleware that handles Polymarket authentication via X-Polymarket-Key header.
+    
+    When a client sends X-Polymarket-Key header (containing their private key),
+    this middleware:
+    1. Derives Polymarket API credentials from the private key
+    2. Caches them in the session store for the duration of the session
+    3. All subsequent authenticated tool calls use the cached credentials
+    
+    This is Polymarket-specific (not in IATP library) - IATP provides generic
+    additional_auth_header_key/value support.
+    """
+    
+    async def dispatch(self, request: Request, call_next):
+        # Check for Polymarket auth header
+        polymarket_key = request.headers.get("X-Polymarket-Key")
+        session_id = request.headers.get("mcp-session-id")
+        
+        if polymarket_key and session_id:
+            # Only derive if we don't already have credentials for this session
+            if not session_credential_store.has_credentials(session_id):
+                try:
+                    logger.info(f"🔑 Received X-Polymarket-Key for session {session_id[:8]}...")
+                    creds = derive_polymarket_credentials_internal(polymarket_key)
+                    session_credential_store.store(session_id, creds, polymarket_key)
+                except Exception as e:
+                    logger.error(f"Failed to derive Polymarket credentials: {e}")
+                    # Continue with the request even if credential derivation fails
+                    # The authenticated tools will return appropriate errors
+        
+        response = await call_next(request)
+        return response
+
+
+def derive_polymarket_credentials_internal(private_key: str) -> ApiCreds:
+    """
+    Derive Polymarket API credentials from a private key.
+    
+    This is used internally by the session middleware to derive and cache credentials.
+    """
+    try:
+        # Create a temporary client just for deriving credentials
+        temp_client = ClobClient(
+            host="https://clob.polymarket.com",
+            chain_id=137,
+            key=private_key,
+            signature_type=2  # EOA signature
+        )
+        
+        # Derive the API credentials
+        creds = temp_client.derive_api_key()
+        
+        logger.info(f"✅ Successfully derived Polymarket API credentials")
+        return creds
+        
+    except Exception as e:
+        logger.error(f"❌ Failed to derive Polymarket credentials: {e}")
+        raise
+
+
+def get_session_credentials(context: Context) -> Optional[Tuple[str, ApiCreds]]:
+    """
+    Get Polymarket credentials from session store based on the current request's session ID.
+    
+    Returns:
+        Tuple of (private_key, ApiCreds) if credentials exist, None otherwise
+    """
+    try:
+        # Debug: Log what we have in context
+        logger.debug(f"get_session_credentials: context type = {type(context)}")
+        logger.debug(f"get_session_credentials: hasattr request_context = {hasattr(context, 'request_context')}")
+        
+        # Get session ID from request headers
+        if hasattr(context, 'request_context') and context.request_context:
+            logger.debug(f"get_session_credentials: request_context type = {type(context.request_context)}")
+            if hasattr(context.request_context, 'request') and context.request_context.request:
+                request = context.request_context.request
+                session_id = request.headers.get("mcp-session-id")
+                logger.debug(f"get_session_credentials: session_id = {session_id[:8] if session_id else 'None'}...")
+                if session_id:
+                    stored = session_credential_store.get(session_id)
+                    if stored:
+                        logger.info(f"✅ Found session credentials for {session_id[:8]}...")
+                        return stored["key"], stored["creds"]
+                    else:
+                        logger.warning(f"⚠️  No credentials found for session {session_id[:8]}...")
+            else:
+                logger.warning("⚠️  request_context has no request attribute")
+        else:
+            logger.warning("⚠️  context has no request_context")
+    except Exception as e:
+        logger.error(f"Error getting session credentials: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+    return None
+
+
+# ============================================================================
 # API Endpoint Tool Implementations
+# ============================================================================
 
 def create_authenticated_clob_client(operator_private_key: str) -> ClobClient:
     """
@@ -149,7 +299,7 @@ async def derive_polymarket_credentials(
 ) -> Dict[str, Any]:
     """
     [CREDENTIAL HELPER] Derive Polymarket API credentials from an operator private key.
-    
+
     This function uses the py-clob-client to derive API credentials from the agent's
     Ethereum private key. The private key is NOT stored - only used in-memory to 
     derive credentials which are returned to the agent.
@@ -316,22 +466,30 @@ async def list_markets(
 )
 async def get_market(
     context: Context,
-    condition_id: Optional[str] = None
+    condition_id: Optional[str] = None,
+    market_id: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Get detailed information about a specific prediction market including current prices, outcomes, liquidity, volume, and resolution details.
 
-    Generated from OpenAPI endpoint: GET /markets/{condition_id}
+    Supports two lookup methods:
+    - condition_id: Use the CLOB API (hex string starting with '0x', e.g., '0x1234...')
+    - market_id: Use the Gamma API (numeric ID, e.g., '12345')
 
     Args:
         context: MCP context (auto-injected by framework, not user-provided)
-        condition_id: The unique condition ID of the market (e.g., '0x...' hex string) (optional) Examples: "0x1234567890abcdef1234567890abcdef12345678"
+        condition_id: The unique condition ID of the market (e.g., '0x...' hex string). Used with CLOB API. Examples: "0x1234567890abcdef1234567890abcdef12345678"
+        market_id: The numeric market ID (e.g., '12345'). Used with Gamma API. Examples: "521234"
 
     Returns:
         Dictionary with API response
 
     Example Usage:
+        # Using condition_id (CLOB API):
         await get_market(condition_id="0x1234567890abcdef1234567890abcdef12345678")
+
+        # Using market_id (Gamma API):
+        await get_market(market_id="521234")
 
         Note: 'context' parameter is auto-injected by MCP framework
     """
@@ -340,7 +498,16 @@ async def get_market(
     api_key = get_active_api_key(context)
 
     try:
-        url = f"https://gamma-api.polymarket.com/markets/{condition_id}"
+        # Determine which API to use based on provided parameters
+        if condition_id:
+            # Use CLOB API for condition_id lookups (hex strings starting with 0x)
+            url = f"https://clob.polymarket.com/markets/{condition_id}"
+        elif market_id:
+            # Use Gamma API for numeric market_id lookups
+            url = f"https://gamma-api.polymarket.com/markets/{market_id}"
+        else:
+            return {"error": "Either condition_id or market_id must be provided", "endpoint": "/markets/{id}"}
+
         params = {}
         headers = {}
         # No auth required for this API
@@ -357,7 +524,7 @@ async def get_market(
 
     except Exception as e:
         logger.error(f"Error in get_market: {e}")
-        return {"error": str(e), "endpoint": "/markets/{condition_id}"}
+        return {"error": str(e), "endpoint": "/markets/{condition_id|market_id}"}
 
 
 @mcp.tool()
@@ -542,47 +709,70 @@ async def get_event(
 )
 async def get_prices(
     context: Context,
-    market_ids: Optional[str] = None
+    token_id: str
 ) -> Dict[str, Any]:
     """
-    Get current prices and implied probabilities for prediction market outcomes. Prices are between 0-1 representing probability (0.65 = 65% probability).
-
-    Generated from OpenAPI endpoint: GET /prices
+    Get current price for a specific token (YES or NO outcome).
+    
+    Prices are between 0-1 representing probability (0.65 = 65% probability).
+    Returns midpoint price (average of best bid and ask) plus the spread.
 
     Args:
         context: MCP context (auto-injected by framework, not user-provided)
-        market_ids: Comma-separated list of market condition IDs to get prices for (optional) Examples: "0x123...,0x456..."
+        token_id: The token ID to get price for.
+                  Get from market data: tokens[0].token_id for YES, tokens[1].token_id for NO
 
     Returns:
-        Dictionary with API response
+        Dictionary with price info (midpoint, spread, bid, ask)
 
     Example Usage:
-        await get_prices(market_ids="0x123...,0x456...")
+        await get_prices(token_id="12345...")
 
         Note: 'context' parameter is auto-injected by MCP framework
     """
-    # Payment already verified by @require_payment_for_tool decorator
-    # Get API key using helper (handles request.state fallback)
-    api_key = get_active_api_key(context)
-
     try:
-        url = f"https://gamma-api.polymarket.com/prices"
-        params = {
-            "market_ids": market_ids
-        }
-        params = {k: v for k, v in params.items() if v is not None}
-        headers = {}
-        # No auth required for this API
-
-        response = requests.get(
-            url,
-            params=params,
-            headers=headers,
+        # Get midpoint (average of best bid/ask)
+        mid_url = f"https://clob.polymarket.com/midpoint"
+        mid_response = requests.get(
+            mid_url,
+            params={"token_id": token_id},
+            headers={},
             timeout=30
         )
-        response.raise_for_status()
-
-        return response.json()
+        mid_data = mid_response.json() if mid_response.status_code == 200 else {"mid": None}
+        
+        # Get spread (difference between best bid/ask)
+        spread_url = f"https://clob.polymarket.com/spread"
+        spread_response = requests.get(
+            spread_url,
+            params={"token_id": token_id},
+            headers={},
+            timeout=30
+        )
+        spread_data = spread_response.json() if spread_response.status_code == 200 else {"spread": None}
+        
+        # Calculate bid/ask from midpoint and spread
+        mid_value = mid_data.get("mid")
+        spread_value = spread_data.get("spread")
+        
+        midpoint: Optional[float] = float(mid_value) if mid_value is not None else None
+        spread_val: Optional[float] = float(spread_value) if spread_value is not None else None
+        
+        bid: Optional[float] = None
+        ask: Optional[float] = None
+        if midpoint is not None and spread_val is not None:
+            bid = round(midpoint - spread_val/2, 4)
+            ask = round(midpoint + spread_val/2, 4)
+        
+        return {
+            "token_id": token_id,
+            "midpoint": midpoint,
+            "spread": spread_val,
+            "estimated_bid": bid,
+            "estimated_ask": ask,
+            "price_formatted": f"{midpoint:.2%}" if midpoint else "N/A",
+            "message": "Use midpoint as the current price estimate"
+        }
 
     except Exception as e:
         logger.error(f"Error in get_prices: {e}")
@@ -694,37 +884,33 @@ async def get_price_history(
 )
 async def get_orderbook(
     context: Context,
-    token_id: Optional[str] = None
+    token_id: str
 ) -> Dict[str, Any]:
     """
     Get the order book for a specific market token showing bid and ask orders with prices and sizes.
 
-    Generated from OpenAPI endpoint: GET /book
+    Uses the CLOB API which requires a token_id (outcome token address).
 
     Args:
         context: MCP context (auto-injected by framework, not user-provided)
-        token_id: The token ID to get the order book for (YES or NO outcome token) (optional)
+        token_id: The token ID to get the order book for (YES or NO outcome token).
+                  Get this from market data: tokens[0].token_id for YES, tokens[1].token_id for NO
 
     Returns:
-        Dictionary with API response
+        Dictionary with bids and asks arrays
 
     Example Usage:
-        await get_orderbook(token_id="example")
+        await get_orderbook(token_id="12345...")
 
         Note: 'context' parameter is auto-injected by MCP framework
     """
-    # Payment already verified by @require_payment_for_tool decorator
-    # Get API key using helper (handles request.state fallback)
-    api_key = get_active_api_key(context)
-
     try:
-        url = f"https://gamma-api.polymarket.com/book"
+        # Use CLOB API for orderbook (not Gamma API)
+        url = f"https://clob.polymarket.com/book"
         params = {
             "token_id": token_id
         }
-        params = {k: v for k, v in params.items() if v is not None}
         headers = {}
-        # No auth required for this API
 
         response = requests.get(
             url,
@@ -760,37 +946,33 @@ async def get_orderbook(
 )
 async def get_midpoint(
     context: Context,
-    token_id: Optional[str] = None
+    token_id: str
 ) -> Dict[str, Any]:
     """
     Get the midpoint price for a market token (average between best bid and ask).
 
-    Generated from OpenAPI endpoint: GET /midpoint
+    Uses the CLOB API which requires a token_id.
 
     Args:
         context: MCP context (auto-injected by framework, not user-provided)
-        token_id: The token ID to get midpoint price for (optional)
+        token_id: The token ID to get midpoint price for.
+                  Get this from market data: tokens[0].token_id for YES, tokens[1].token_id for NO
 
     Returns:
-        Dictionary with API response
+        Dictionary with midpoint price
 
     Example Usage:
-        await get_midpoint(token_id="example")
+        await get_midpoint(token_id="12345...")
 
         Note: 'context' parameter is auto-injected by MCP framework
     """
-    # Payment already verified by @require_payment_for_tool decorator
-    # Get API key using helper (handles request.state fallback)
-    api_key = get_active_api_key(context)
-
     try:
-        url = f"https://gamma-api.polymarket.com/midpoint"
+        # Use CLOB API for midpoint (not Gamma API)
+        url = f"https://clob.polymarket.com/midpoint"
         params = {
             "token_id": token_id
         }
-        params = {k: v for k, v in params.items() if v is not None}
         headers = {}
-        # No auth required for this API
 
         response = requests.get(
             url,
@@ -826,37 +1008,33 @@ async def get_midpoint(
 )
 async def get_spread(
     context: Context,
-    token_id: Optional[str] = None
+    token_id: str
 ) -> Dict[str, Any]:
     """
     Get the bid-ask spread for a market token showing the difference between best bid and best ask prices.
 
-    Generated from OpenAPI endpoint: GET /spread
+    Uses the CLOB API which requires a token_id.
 
     Args:
         context: MCP context (auto-injected by framework, not user-provided)
-        token_id: The token ID to get spread for (optional)
+        token_id: The token ID to get spread for.
+                  Get this from market data: tokens[0].token_id for YES, tokens[1].token_id for NO
 
     Returns:
-        Dictionary with API response
+        Dictionary with spread info
 
     Example Usage:
-        await get_spread(token_id="example")
+        await get_spread(token_id="12345...")
 
         Note: 'context' parameter is auto-injected by MCP framework
     """
-    # Payment already verified by @require_payment_for_tool decorator
-    # Get API key using helper (handles request.state fallback)
-    api_key = get_active_api_key(context)
-
     try:
-        url = f"https://gamma-api.polymarket.com/spread"
+        # Use CLOB API for spread (not Gamma API)
+        url = f"https://clob.polymarket.com/spread"
         params = {
             "token_id": token_id
         }
-        params = {k: v for k, v in params.items() if v is not None}
         headers = {}
-        # No auth required for this API
 
         response = requests.get(
             url,
@@ -893,59 +1071,70 @@ async def get_spread(
 async def get_trades(
     context: Context,
     token_id: Optional[str] = None,
-    limit: int = 100,
-    before: Optional[str] = None,
-    after: Optional[str] = None
+    limit: int = 100
 ) -> Union[List[Dict[str, Any]], Dict[str, Any]]:
     """
-    Get recent trade history for a market showing executed transactions with prices, sizes, and timestamps.
-
-    Generated from OpenAPI endpoint: GET /trades
+    Get your trade history showing executed transactions with prices, sizes, and timestamps.
+    
+    REQUIRES SESSION AUTH: Initialize session with X-Polymarket-Key header first.
+    
+    This endpoint returns YOUR trades (authenticated user's trade history).
 
     Args:
         context: MCP context (auto-injected by framework, not user-provided)
-        token_id: The token ID to get trades for (optional)
+        token_id: Filter trades by token ID (optional)
         limit: Maximum number of trades to return (optional, default: 100)
-        before: Get trades before this trade ID (for pagination) (optional)
-        after: Get trades after this trade ID (for pagination) (optional)
 
     Returns:
-        Dictionary with API response
+        List of trade objects
 
     Example Usage:
-        # Minimal (required params only):
-        await get_trades(token_id="example")
+        # Get all your recent trades:
+        await get_trades(limit=10)
 
-        # With optional parameters:
-        await get_trades(token_id="example", limit=100)
+        # Get your trades for a specific token:
+        await get_trades(token_id="12345...", limit=100)
 
         Note: 'context' parameter is auto-injected by MCP framework
     """
-    # Payment already verified by @require_payment_for_tool decorator
-    # Get API key using helper (handles request.state fallback)
-    api_key = get_active_api_key(context)
-
     try:
-        url = f"https://gamma-api.polymarket.com/trades"
-        params = {
-            "token_id": token_id,
-            "limit": limit,
-            "before": before,
-            "after": after
-        }
-        params = {k: v for k, v in params.items() if v is not None}
-        headers = {}
-        # No auth required for this API
-
-        response = requests.get(
-            url,
-            params=params,
-            headers=headers,
-            timeout=30
+        # Get session credentials (required for CLOB trades endpoint)
+        session_creds = get_session_credentials(context)
+        
+        if not session_creds:
+            return {
+                "error": "No Polymarket credentials available",
+                "message": "Initialize session with X-Polymarket-Key header containing your Polymarket private key"
+            }
+        
+        private_key, creds = session_creds
+        client = ClobClient(
+            host="https://clob.polymarket.com",
+            chain_id=137,
+            key=private_key,
+            creds=creds,
+            signature_type=2
         )
-        response.raise_for_status()
-
-        return response.json()
+        
+        # Use py-clob-client to get trades
+        from py_clob_client.clob_types import TradeParams
+        
+        params = TradeParams()
+        if token_id:
+            params = TradeParams(asset_id=token_id)
+        
+        trades = client.get_trades(params)
+        
+        # Limit results if needed
+        if isinstance(trades, list) and len(trades) > limit:
+            trades = trades[:limit]
+        
+        return {
+            "success": True,
+            "trades": trades,
+            "count": len(trades) if isinstance(trades, list) else 0,
+            "message": "Your trade history retrieved successfully"
+        }
 
     except Exception as e:
         logger.error(f"Error in get_trades: {e}")
@@ -1050,7 +1239,6 @@ async def get_timeseries(
 )
 async def create_order(
     context: Context,
-    operator_private_key: str,
     token_id: str,
     side: str,
     price: float,
@@ -1060,13 +1248,11 @@ async def create_order(
 ) -> Dict[str, Any]:
     """
     [TRADING] Create a new order to buy or sell prediction market shares.
-    
-    Credentials are derived automatically from the private key.
-    Trade executes on agent's Polymarket account with their funds.
+
+    REQUIRES SESSION AUTH: Initialize session with X-Polymarket-Key header first.
 
     Args:
         context: MCP context (auto-injected by framework)
-        operator_private_key: Agent's Ethereum/Polygon private key (0x prefixed)
         token_id: The token ID to trade (outcome token address)
         side: Order side - "BUY" or "SELL"
         price: Limit price for the order (0-1 range for probability)
@@ -1078,17 +1264,26 @@ async def create_order(
         Dictionary with order details or error
 
     Example Usage:
-        await create_order(
-            operator_private_key="0x...",
-            token_id="0x...",
-            side="BUY",
-            price=0.65,
-            size=10.0
-        )
+        await create_order(token_id="0x...", side="BUY", price=0.65, size=10.0)
     """
     try:
-        # Create authenticated client (derives credentials internally)
-        client = create_authenticated_clob_client(operator_private_key)
+        # Get session credentials (required)
+        session_creds = get_session_credentials(context)
+        
+        if not session_creds:
+            return {
+                "error": "No Polymarket credentials available",
+                "message": "Initialize session with X-Polymarket-Key header containing your Polymarket private key"
+            }
+        
+        private_key, creds = session_creds
+        client = ClobClient(
+            host="https://clob.polymarket.com",
+            chain_id=137,
+            key=private_key,
+            creds=creds,
+            signature_type=2
+        )
         
         # Build and submit order using OrderArgs
         from py_clob_client.clob_types import OrderArgs
@@ -1124,6 +1319,104 @@ async def create_order(
 @mcp.tool()
 @require_payment_for_tool(
     price=TokenAmount(
+        amount="1000000000000000",  # 0.001 tokens (market orders are more expensive)
+        asset=TokenAsset(
+            address="0x3e17730bb2ca51a8D5deD7E44c003A2e95a4d822",
+            decimals=6,
+            network="sepolia",
+            eip712=EIP712Domain(
+                name="IATPWallet",
+                version="1"
+            )
+        )
+    ),
+    description="[TRADING] Create a market order for immediate execution"
+
+)
+async def create_market_order(
+    context: Context,
+    token_id: str,
+    side: str,
+    amount: float,
+    worst_price: Optional[float] = None
+) -> Dict[str, Any]:
+    """
+    [TRADING] Create a market order for immediate execution at best available price.
+
+    Unlike limit orders, market orders execute immediately at the current market price.
+    Use this when you want guaranteed execution rather than a specific price.
+    
+    REQUIRES SESSION AUTH: Initialize session with X-Polymarket-Key header first.
+
+    Args:
+        context: MCP context (auto-injected by framework)
+        token_id: The token ID to trade (outcome token address, get from market data)
+        side: Order side - "BUY" or "SELL"
+        amount: Amount in USDC to spend (for BUY) or shares to sell (for SELL)
+        worst_price: Optional worst acceptable price (0-1). If market moves beyond this, order fails.
+                     For BUY: max price you're willing to pay. For SELL: min price you'll accept.
+
+    Returns:
+        Dictionary with order execution details
+
+    Example Usage:
+        # Buy $10 worth at market price:
+        await create_market_order(token_id="0x...", side="BUY", amount=10.0)
+        
+        # Buy $10 worth but only if price is below 0.65:
+        await create_market_order(token_id="0x...", side="BUY", amount=10.0, worst_price=0.65)
+    """
+    try:
+        session_creds = get_session_credentials(context)
+        
+        if not session_creds:
+            return {
+                "error": "No Polymarket credentials available",
+                "message": "Initialize session with X-Polymarket-Key header containing your Polymarket private key"
+            }
+        
+        private_key, creds = session_creds
+        client = ClobClient(
+            host="https://clob.polymarket.com",
+            chain_id=137,
+            key=private_key,
+            creds=creds,
+            signature_type=2
+        )
+        
+        # Build market order args
+        from py_clob_client.clob_types import MarketOrderArgs
+        from py_clob_client.order_builder.constants import BUY, SELL
+        
+        order_side = BUY if side.upper() == "BUY" else SELL
+        
+        # Create market order args
+        # price=0 means execute at best available market price (no limit)
+        market_order_args = MarketOrderArgs(
+            token_id=token_id,
+            amount=float(amount),
+            side=order_side,
+            price=float(worst_price) if worst_price is not None else 0.0
+        )
+        
+        # Create and submit the market order
+        order = client.create_market_order(market_order_args)
+        
+        logger.info(f"Market order created successfully: {order}")
+        return {
+            "success": True,
+            "order": order,
+            "message": "Market order submitted successfully. Check 'order' for execution details."
+        }
+
+    except Exception as e:
+        logger.error(f"Error in create_market_order: {e}")
+        return {"error": str(e), "message": "Failed to create market order"}
+
+
+@mcp.tool()
+@require_payment_for_tool(
+    price=TokenAmount(
         amount="500000000000000",  # 0.0005 tokens
         asset=TokenAsset(
             address="0x3e17730bb2ca51a8D5deD7E44c003A2e95a4d822",
@@ -1140,25 +1433,38 @@ async def create_order(
 )
 async def cancel_order(
     context: Context,
-    operator_private_key: str,
     order_id: str
 ) -> Dict[str, Any]:
     """
     [TRADING] Cancel an open order by its order ID.
-    
-    Credentials are derived automatically from the private key.
+
+    REQUIRES SESSION AUTH: Initialize session with X-Polymarket-Key header first.
 
     Args:
         context: MCP context (auto-injected by framework)
-        operator_private_key: Agent's Ethereum/Polygon private key (0x prefixed)
         order_id: The unique order ID to cancel
 
     Returns:
         Dictionary with cancellation result
     """
     try:
-        # Create authenticated client (derives credentials internally)
-        client = create_authenticated_clob_client(operator_private_key)
+        # Get session credentials (required)
+        session_creds = get_session_credentials(context)
+        
+        if not session_creds:
+            return {
+                "error": "No Polymarket credentials available",
+                "message": "Initialize session with X-Polymarket-Key header containing your Polymarket private key"
+            }
+        
+        private_key, creds = session_creds
+        client = ClobClient(
+            host="https://clob.polymarket.com",
+            chain_id=137,
+            key=private_key,
+            creds=creds,
+            signature_type=2
+        )
         
         # Cancel the order
         result = client.cancel(order_id)
@@ -1195,19 +1501,17 @@ async def cancel_order(
 )
 async def get_orders(
     context: Context,
-    operator_private_key: str,
     market: Optional[str] = None,
     asset_id: Optional[str] = None,
     state: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     [TRADING] Get all orders for the agent's account.
-    
-    Credentials are derived automatically from the private key.
+
+    REQUIRES SESSION AUTH: Initialize session with X-Polymarket-Key header first.
 
     Args:
         context: MCP context (auto-injected by framework)
-        operator_private_key: Agent's Ethereum/Polygon private key (0x prefixed)
         market: Filter by market condition ID (optional)
         asset_id: Filter by asset/token ID (optional)
         state: Filter by order state - "open", "matched", "cancelled" (optional)
@@ -1216,8 +1520,23 @@ async def get_orders(
         List of orders
     """
     try:
-        # Create authenticated client (derives credentials internally)
-        client = create_authenticated_clob_client(operator_private_key)
+        # Get session credentials (required)
+        session_creds = get_session_credentials(context)
+        
+        if not session_creds:
+            return {
+                "error": "No Polymarket credentials available",
+                "message": "Initialize session with X-Polymarket-Key header containing your Polymarket private key"
+            }
+        
+        private_key, creds = session_creds
+        client = ClobClient(
+            host="https://clob.polymarket.com",
+            chain_id=137,
+            key=private_key,
+            creds=creds,
+            signature_type=2
+        )
         
         # Get orders with optional filters
         from py_clob_client.clob_types import OpenOrderParams
@@ -1257,18 +1576,16 @@ async def get_orders(
 )
 async def cancel_all_orders(
     context: Context,
-    operator_private_key: str,
     market: Optional[str] = None,
     asset_id: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     [TRADING] Cancel all open orders for the agent's account.
     
-    Credentials are derived automatically from the private key.
+    REQUIRES SESSION AUTH: Initialize session with X-Polymarket-Key header first.
 
     Args:
         context: MCP context (auto-injected by framework)
-        operator_private_key: Agent's Ethereum/Polygon private key (0x prefixed)
         market: Optional market condition ID to cancel orders for
         asset_id: Optional asset/token ID to cancel orders for
 
@@ -1276,8 +1593,23 @@ async def cancel_all_orders(
         Dictionary with cancellation result
     """
     try:
-        # Create authenticated client (derives credentials internally)
-        client = create_authenticated_clob_client(operator_private_key)
+        # Get session credentials (required)
+        session_creds = get_session_credentials(context)
+        
+        if not session_creds:
+            return {
+                "error": "No Polymarket credentials available",
+                "message": "Initialize session with X-Polymarket-Key header containing your Polymarket private key"
+            }
+        
+        private_key, creds = session_creds
+        client = ClobClient(
+            host="https://clob.polymarket.com",
+            chain_id=137,
+            key=private_key,
+            creds=creds,
+            signature_type=2
+        )
         
         # Cancel all orders
         result = client.cancel_all()
@@ -1308,36 +1640,146 @@ async def cancel_all_orders(
             )
         )
     ),
-    description="[TRADING - REQUIRES AGENT CREDENTIALS] Get USDC ba"
+    description="[TRADING] Get account balances - cash (USDC) and portfolio value"
 
 )
 async def get_balance(
-    context: Context,
-    operator_private_key: str
+    context: Context
 ) -> Dict[str, Any]:
     """
-    [TRADING] Get USDC balance for the agent's Polymarket account.
+    [TRADING] Get account balances - both cash and portfolio value (like Polymarket UI).
     
-    Credentials are derived automatically from the private key.
+    This returns both values you see on Polymarket UI:
+    - Cash Balance: USDC available for trading
+    - Portfolio Balance: Total value of all open positions
+    - Total Balance: Cash + Portfolio combined
+    
+    REQUIRES SESSION AUTH: Initialize session with X-Polymarket-Key header first.
 
     Args:
         context: MCP context (auto-injected by framework)
-        operator_private_key: Agent's Ethereum/Polygon private key (0x prefixed)
 
     Returns:
-        Dictionary with balance information
+        Dictionary with cash_balance, portfolio_balance, total_balance, and positions list
     """
     try:
-        # Create authenticated client (derives credentials internally)
-        client = create_authenticated_clob_client(operator_private_key)
+        # Get session credentials (required)
+        session_creds = get_session_credentials(context)
         
-        # Get balance
-        balance = client.get_balance_allowance()
+        if not session_creds:
+            return {
+                "error": "No Polymarket credentials available",
+                "message": "Initialize session with X-Polymarket-Key header containing your Polymarket private key"
+            }
+        
+        private_key, creds = session_creds
+        client = ClobClient(
+            host="https://clob.polymarket.com",
+            chain_id=137,
+            key=private_key,
+            creds=creds,
+            signature_type=2
+        )
+        
+        # 1. Get COLLATERAL (USDC cash) balance - "Cash Balance" in Polymarket UI
+        cash_params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL, signature_type=2)  # type: ignore
+        cash_balance = client.get_balance_allowance(cash_params)
+        
+        # Parse cash balance
+        if isinstance(cash_balance, dict):
+            usdc_raw = cash_balance.get("balance", "0")
+        else:
+            usdc_raw = "0"
+        
+        cash_amount = float(usdc_raw) / 1e6 if usdc_raw else 0.0  # USDC has 6 decimals
+        
+        # 2. Get all positions to calculate portfolio value
+        from py_clob_client.clob_types import TradeParams
+        trades_response = client.get_trades(TradeParams())
+        
+        # Parse positions and calculate portfolio value
+        positions = []
+        portfolio_value = 0.0
+        
+        if isinstance(trades_response, list):
+            # Group trades by asset_id to calculate net position for each
+            position_map: Dict[str, Dict[str, Any]] = {}
+            
+            for trade in trades_response:
+                if isinstance(trade, dict):
+                    asset_id = trade.get("asset_id", "")
+                    side = trade.get("side", "").upper()
+                    size = float(trade.get("size", 0))
+                    price = float(trade.get("price", 0))
+                    
+                    if asset_id not in position_map:
+                        position_map[asset_id] = {
+                            "asset_id": asset_id,
+                            "market": trade.get("market", ""),
+                            "outcome": trade.get("outcome", ""),
+                            "shares": 0.0,
+                            "avg_price": 0.0,
+                            "total_cost": 0.0,
+                            "trade_count": 0
+                        }
+                    
+                    pos = position_map[asset_id]
+                    if side == "BUY":
+                        pos["shares"] += size
+                        pos["total_cost"] += size * price
+                    else:  # SELL
+                        pos["shares"] -= size
+                        pos["total_cost"] -= size * price
+                    pos["trade_count"] += 1
+            
+            # Calculate current value for each position
+            for asset_id, pos in position_map.items():
+                if pos["shares"] > 0.01:  # Only include non-zero positions
+                    # Get current price for this token
+                    try:
+                        current_price = client.get_last_trade_price(asset_id)
+                        if isinstance(current_price, dict):
+                            last_price = float(current_price.get("price", 0.5))
+                        else:
+                            last_price = 0.5  # Default to 50% if unknown
+                    except Exception:
+                        last_price = 0.5
+                    
+                    current_value = pos["shares"] * last_price
+                    avg_price = pos["total_cost"] / pos["shares"] if pos["shares"] > 0 else 0
+                    
+                    positions.append({
+                        "asset_id": asset_id,
+                        "market": pos["market"],
+                        "outcome": pos["outcome"],
+                        "shares": round(pos["shares"], 4),
+                        "avg_entry_price": round(avg_price, 4),
+                        "current_price": round(last_price, 4),
+                        "current_value": round(current_value, 2),
+                        "pnl": round(current_value - pos["total_cost"], 2),
+                        "pnl_percent": round(((current_value / pos["total_cost"]) - 1) * 100, 2) if pos["total_cost"] > 0 else 0
+                    })
+                    portfolio_value += current_value
+        
+        total_balance = cash_amount + portfolio_value
         
         return {
             "success": True,
-            "balance": balance,
-            "message": "Balance retrieved successfully"
+            "cash_balance": {
+                "amount": round(cash_amount, 2),
+                "formatted": f"${cash_amount:.2f}"
+            },
+            "portfolio_balance": {
+                "amount": round(portfolio_value, 2),
+                "formatted": f"${portfolio_value:.2f}",
+                "position_count": len(positions)
+            },
+            "total_balance": {
+                "amount": round(total_balance, 2),
+                "formatted": f"${total_balance:.2f}"
+            },
+            "positions": positions,
+            "message": f"Cash: ${cash_amount:.2f} | Portfolio: ${portfolio_value:.2f} | Total: ${total_balance:.2f}"
         }
 
     except Exception as e:
@@ -1364,25 +1806,38 @@ async def get_balance(
 )
 async def get_positions(
     context: Context,
-    operator_private_key: str,
     market: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     [TRADING] Get all open positions for the agent's account.
     
-    Credentials are derived automatically from the private key.
+    REQUIRES SESSION AUTH: Initialize session with X-Polymarket-Key header first.
 
     Args:
         context: MCP context (auto-injected by framework)
-        operator_private_key: Agent's Ethereum/Polygon private key (0x prefixed)
         market: Optional market condition ID to filter positions
 
     Returns:
         Dictionary with positions information
     """
     try:
-        # Create authenticated client (derives credentials internally)
-        client = create_authenticated_clob_client(operator_private_key)
+        # Get session credentials (required)
+        session_creds = get_session_credentials(context)
+        
+        if not session_creds:
+            return {
+                "error": "No Polymarket credentials available",
+                "message": "Initialize session with X-Polymarket-Key header containing your Polymarket private key"
+            }
+        
+        private_key, creds = session_creds
+        client = ClobClient(
+            host="https://clob.polymarket.com",
+            chain_id=137,
+            key=private_key,
+            creds=creds,
+            signature_type=2
+        )
         
         # Get trades which show positions
         trades = client.get_trades()
@@ -1396,6 +1851,510 @@ async def get_positions(
     except Exception as e:
         logger.error(f"Error in get_positions: {e}")
         return {"error": str(e), "message": "Failed to get positions"}
+
+
+# ============================================================================
+# ADDITIONAL AUTHENTICATED ENDPOINTS
+# ============================================================================
+
+
+@mcp.tool()
+@require_payment_for_tool(
+    price=TokenAmount(
+        amount="100000000000000",  # 0.0001 tokens
+        asset=TokenAsset(
+            address="0x3e17730bb2ca51a8D5deD7E44c003A2e95a4d822",
+            decimals=6,
+            network="sepolia",
+            eip712=EIP712Domain(
+                name="IATPWallet",
+                version="1"
+            )
+        )
+    ),
+    description="[TRADING] Get a specific order by its order hash/ID"
+
+)
+async def get_order(
+    context: Context,
+    order_id: str
+) -> Dict[str, Any]:
+    """
+    [TRADING] Get details of a specific order by its order hash/ID.
+
+    REQUIRES SESSION AUTH: Initialize session with X-Polymarket-Key header first.
+
+    Args:
+        context: MCP context (auto-injected by framework)
+        order_id: The unique order hash/ID to fetch
+
+    Returns:
+        Dictionary with order details
+    """
+    try:
+        session_creds = get_session_credentials(context)
+        
+        if not session_creds:
+            return {
+                "error": "No Polymarket credentials available",
+                "message": "Initialize session with X-Polymarket-Key header containing your Polymarket private key"
+            }
+        
+        private_key, creds = session_creds
+        client = ClobClient(
+            host="https://clob.polymarket.com",
+            chain_id=137,
+            key=private_key,
+            creds=creds,
+            signature_type=2
+        )
+        
+        order = client.get_order(order_id)
+        
+        return {
+            "success": True,
+            "order": order,
+            "message": "Order retrieved successfully"
+        }
+
+    except Exception as e:
+        logger.error(f"Error in get_order: {e}")
+        return {"error": str(e), "message": "Failed to get order"}
+
+
+@mcp.tool()
+@require_payment_for_tool(
+    price=TokenAmount(
+        amount="500000000000000",  # 0.0005 tokens
+        asset=TokenAsset(
+            address="0x3e17730bb2ca51a8D5deD7E44c003A2e95a4d822",
+            decimals=6,
+            network="sepolia",
+            eip712=EIP712Domain(
+                name="IATPWallet",
+                version="1"
+            )
+        )
+    ),
+    description="[TRADING] Cancel multiple orders by their order IDs"
+
+)
+async def cancel_orders(
+    context: Context,
+    order_ids: str
+) -> Dict[str, Any]:
+    """
+    [TRADING] Cancel multiple orders by their order IDs.
+
+    REQUIRES SESSION AUTH: Initialize session with X-Polymarket-Key header first.
+
+    Args:
+        context: MCP context (auto-injected by framework)
+        order_ids: Comma-separated list of order IDs to cancel (e.g., "id1,id2,id3")
+
+    Returns:
+        Dictionary with cancellation results
+    """
+    try:
+        session_creds = get_session_credentials(context)
+        
+        if not session_creds:
+            return {
+                "error": "No Polymarket credentials available",
+                "message": "Initialize session with X-Polymarket-Key header containing your Polymarket private key"
+            }
+        
+        private_key, creds = session_creds
+        client = ClobClient(
+            host="https://clob.polymarket.com",
+            chain_id=137,
+            key=private_key,
+            creds=creds,
+            signature_type=2
+        )
+        
+        # Parse comma-separated order IDs
+        ids = [id.strip() for id in order_ids.split(",") if id.strip()]
+        
+        result = client.cancel_orders(ids)
+        
+        return {
+            "success": True,
+            "result": result,
+            "cancelled_count": len(ids),
+            "message": f"Cancelled {len(ids)} orders"
+        }
+
+    except Exception as e:
+        logger.error(f"Error in cancel_orders: {e}")
+        return {"error": str(e), "message": "Failed to cancel orders"}
+
+
+@mcp.tool()
+@require_payment_for_tool(
+    price=TokenAmount(
+        amount="500000000000000",  # 0.0005 tokens
+        asset=TokenAsset(
+            address="0x3e17730bb2ca51a8D5deD7E44c003A2e95a4d822",
+            decimals=6,
+            network="sepolia",
+            eip712=EIP712Domain(
+                name="IATPWallet",
+                version="1"
+            )
+        )
+    ),
+    description="[TRADING] Cancel all orders for a specific market"
+
+)
+async def cancel_market_orders(
+    context: Context,
+    market: Optional[str] = None,
+    asset_id: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    [TRADING] Cancel all orders for a specific market or asset.
+
+    REQUIRES SESSION AUTH: Initialize session with X-Polymarket-Key header first.
+
+    Args:
+        context: MCP context (auto-injected by framework)
+        market: Market condition ID to cancel orders for (optional)
+        asset_id: Token/asset ID to cancel orders for (optional)
+
+    Returns:
+        Dictionary with cancellation result
+    """
+    try:
+        session_creds = get_session_credentials(context)
+        
+        if not session_creds:
+            return {
+                "error": "No Polymarket credentials available",
+                "message": "Initialize session with X-Polymarket-Key header containing your Polymarket private key"
+            }
+        
+        private_key, creds = session_creds
+        client = ClobClient(
+            host="https://clob.polymarket.com",
+            chain_id=137,
+            key=private_key,
+            creds=creds,
+            signature_type=2
+        )
+        
+        # Pass only non-None values to cancel_market_orders
+        kwargs = {}
+        if market is not None:
+            kwargs["market"] = market
+        if asset_id is not None:
+            kwargs["asset_id"] = asset_id
+        result = client.cancel_market_orders(**kwargs) if kwargs else client.cancel_all()
+        
+        return {
+            "success": True,
+            "result": result,
+            "message": "Market orders cancelled successfully"
+        }
+
+    except Exception as e:
+        logger.error(f"Error in cancel_market_orders: {e}")
+        return {"error": str(e), "message": "Failed to cancel market orders"}
+
+
+@mcp.tool()
+@require_payment_for_tool(
+    price=TokenAmount(
+        amount="100000000000000",  # 0.0001 tokens
+        asset=TokenAsset(
+            address="0x3e17730bb2ca51a8D5deD7E44c003A2e95a4d822",
+            decimals=6,
+            network="sepolia",
+            eip712=EIP712Domain(
+                name="IATPWallet",
+                version="1"
+            )
+        )
+    ),
+    description="[TRADING] Update USDC trading allowance for the exchange"
+
+)
+async def update_balance_allowance(
+    context: Context,
+    allowance_amount: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    [TRADING] Update USDC allowance for trading on Polymarket.
+
+    This sets how much USDC the exchange contract can spend on your behalf.
+    Required before placing orders if allowance is insufficient.
+
+    REQUIRES SESSION AUTH: Initialize session with X-Polymarket-Key header first.
+
+    Args:
+        context: MCP context (auto-injected by framework)
+        allowance_amount: Amount to approve (optional, defaults to max uint256)
+
+    Returns:
+        Dictionary with transaction result
+    """
+    try:
+        session_creds = get_session_credentials(context)
+        
+        if not session_creds:
+            return {
+                "error": "No Polymarket credentials available",
+                "message": "Initialize session with X-Polymarket-Key header containing your Polymarket private key"
+            }
+        
+        private_key, creds = session_creds
+        client = ClobClient(
+            host="https://clob.polymarket.com",
+            chain_id=137,
+            key=private_key,
+            creds=creds,
+            signature_type=2
+        )
+        
+        result = client.update_balance_allowance()
+        
+        return {
+            "success": True,
+            "result": result,
+            "message": "Balance allowance updated successfully"
+        }
+
+    except Exception as e:
+        logger.error(f"Error in update_balance_allowance: {e}")
+        return {"error": str(e), "message": "Failed to update balance allowance"}
+
+
+@mcp.tool()
+@require_payment_for_tool(
+    price=TokenAmount(
+        amount="50000000000000",  # 0.00005 tokens
+        asset=TokenAsset(
+            address="0x3e17730bb2ca51a8D5deD7E44c003A2e95a4d822",
+            decimals=6,
+            network="sepolia",
+            eip712=EIP712Domain(
+                name="IATPWallet",
+                version="1"
+            )
+        )
+    ),
+    description="[TRADING] Get user notifications from Polymarket"
+
+)
+async def get_notifications(
+    context: Context
+) -> Dict[str, Any]:
+    """
+    [TRADING] Get notifications for the authenticated user.
+
+    Returns order fills, settlements, and other account notifications.
+
+    REQUIRES SESSION AUTH: Initialize session with X-Polymarket-Key header first.
+
+    Args:
+        context: MCP context (auto-injected by framework)
+
+    Returns:
+        Dictionary with notifications list
+    """
+    try:
+        session_creds = get_session_credentials(context)
+        
+        if not session_creds:
+            return {
+                "error": "No Polymarket credentials available",
+                "message": "Initialize session with X-Polymarket-Key header containing your Polymarket private key"
+            }
+        
+        private_key, creds = session_creds
+        client = ClobClient(
+            host="https://clob.polymarket.com",
+            chain_id=137,
+            key=private_key,
+            creds=creds,
+            signature_type=2
+        )
+        
+        notifications = client.get_notifications()
+        
+        return {
+            "success": True,
+            "notifications": notifications,
+            "count": len(notifications) if isinstance(notifications, list) else 0,
+            "message": "Notifications retrieved successfully"
+        }
+
+    except Exception as e:
+        logger.error(f"Error in get_notifications: {e}")
+        return {"error": str(e), "message": "Failed to get notifications"}
+
+
+@mcp.tool()
+@require_payment_for_tool(
+    price=TokenAmount(
+        amount="50000000000000",  # 0.00005 tokens
+        asset=TokenAsset(
+            address="0x3e17730bb2ca51a8D5deD7E44c003A2e95a4d822",
+            decimals=6,
+            network="sepolia",
+            eip712=EIP712Domain(
+                name="IATPWallet",
+                version="1"
+            )
+        )
+    ),
+    description="[TRADING] Clear/dismiss all notifications"
+
+)
+async def drop_notifications(
+    context: Context
+) -> Dict[str, Any]:
+    """
+    [TRADING] Clear/dismiss all notifications for the authenticated user.
+
+    REQUIRES SESSION AUTH: Initialize session with X-Polymarket-Key header first.
+
+    Args:
+        context: MCP context (auto-injected by framework)
+
+    Returns:
+        Dictionary with result
+    """
+    try:
+        session_creds = get_session_credentials(context)
+        
+        if not session_creds:
+            return {
+                "error": "No Polymarket credentials available",
+                "message": "Initialize session with X-Polymarket-Key header containing your Polymarket private key"
+            }
+        
+        private_key, creds = session_creds
+        client = ClobClient(
+            host="https://clob.polymarket.com",
+            chain_id=137,
+            key=private_key,
+            creds=creds,
+            signature_type=2
+        )
+        
+        result = client.drop_notifications()
+        
+        return {
+            "success": True,
+            "result": result,
+            "message": "Notifications cleared successfully"
+        }
+
+    except Exception as e:
+        logger.error(f"Error in drop_notifications: {e}")
+        return {"error": str(e), "message": "Failed to clear notifications"}
+
+
+@mcp.tool()
+@require_payment_for_tool(
+    price=TokenAmount(
+        amount="2000000000000000",  # 0.002 tokens (higher for batch operations)
+        asset=TokenAsset(
+            address="0x3e17730bb2ca51a8D5deD7E44c003A2e95a4d822",
+            decimals=6,
+            network="sepolia",
+            eip712=EIP712Domain(
+                name="IATPWallet",
+                version="1"
+            )
+        )
+    ),
+    description="[TRADING] Submit multiple orders at once (batch)"
+
+)
+async def post_orders(
+    context: Context,
+    orders_json: str
+) -> Dict[str, Any]:
+    """
+    [TRADING] Submit multiple orders at once (batch operation).
+
+    REQUIRES SESSION AUTH: Initialize session with X-Polymarket-Key header first.
+
+    Args:
+        context: MCP context (auto-injected by framework)
+        orders_json: JSON array of order objects. Each order needs:
+            - token_id: Token ID to trade
+            - side: "BUY" or "SELL"
+            - price: Limit price (0-1)
+            - size: Size in USDC
+
+    Returns:
+        Dictionary with batch order results
+
+    Example:
+        orders_json = '[{"token_id":"0x...","side":"BUY","price":0.5,"size":10}]'
+    """
+    try:
+        session_creds = get_session_credentials(context)
+        
+        if not session_creds:
+            return {
+                "error": "No Polymarket credentials available",
+                "message": "Initialize session with X-Polymarket-Key header containing your Polymarket private key"
+            }
+        
+        private_key, creds = session_creds
+        client = ClobClient(
+            host="https://clob.polymarket.com",
+            chain_id=137,
+            key=private_key,
+            creds=creds,
+            signature_type=2
+        )
+        
+        # Parse orders JSON
+        orders_data = json.loads(orders_json)
+        if not isinstance(orders_data, list):
+            return {"error": "orders_json must be a JSON array", "message": "Invalid input format"}
+        
+        from py_clob_client.clob_types import OrderArgs
+        from py_clob_client.order_builder.constants import BUY, SELL
+        
+        # Build signed orders
+        signed_orders = []
+        for order_data in orders_data:
+            order_side = BUY if order_data.get("side", "").upper() == "BUY" else SELL
+            order_args = OrderArgs(
+                token_id=order_data["token_id"],
+                price=float(order_data["price"]),
+                size=float(order_data["size"]),
+                side=order_side
+            )
+            signed_order = client.create_order(order_args)
+            signed_orders.append(signed_order)
+        
+        # Post all orders
+        result = client.post_orders(signed_orders)
+        
+        return {
+            "success": True,
+            "result": result,
+            "orders_submitted": len(signed_orders),
+            "message": f"Submitted {len(signed_orders)} orders"
+        }
+
+    except json.JSONDecodeError as e:
+        return {"error": f"Invalid JSON: {e}", "message": "Failed to parse orders_json"}
+    except Exception as e:
+        logger.error(f"Error in post_orders: {e}")
+        return {"error": str(e), "message": "Failed to post orders"}
+
+
+# ============================================================================
+# PUBLIC ENDPOINTS (No authentication required)
+# ============================================================================
 
 
 @mcp.tool()
@@ -1557,7 +2516,7 @@ async def list_sports(
 ) -> Union[List[Dict[str, Any]], Dict[str, Any]]:
     """
     Get list of all supported sports leagues on Polymarket with their series IDs.
-    
+
     Use this to discover sports leagues, then use the series_id with list_events()
     to filter events for a specific league.
 
@@ -2037,6 +2996,11 @@ def create_app_with_middleware():
     )
     logger.info("✅ Added D402PaymentMiddleware")
     logger.info("   - Payment-only mode")
+    
+    # Add Polymarket auth middleware to handle X-Polymarket-Key header
+    # This derives and caches Polymarket API credentials for the session
+    app.add_middleware(PolymarketAuthMiddleware)
+    logger.info("✅ Added PolymarketAuthMiddleware (session-based credential caching)")
     
     # Add health check endpoint (bypasses middleware)
     @app.route("/health", methods=["GET"])
