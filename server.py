@@ -1619,6 +1619,222 @@ async def list_sports(
 @mcp.tool()
 @require_payment_for_tool(
     price=TokenAmount(
+        amount="50000000000000",  # 5e-05 tokens
+        asset=TokenAsset(
+            address="0x3e17730bb2ca51a8D5deD7E44c003A2e95a4d822",
+            decimals=6,
+            network="sepolia",
+            eip712=EIP712Domain(
+                name="IATPWallet",
+                version="1"
+            )
+        )
+    ),
+    description="Get all series (grouped recurring events like BTC Up/Down Hourly)"
+
+)
+async def list_series(
+    context: Context,
+    limit: int = 100,
+    offset: int = 0,
+    active: bool = True
+) -> Union[List[Dict[str, Any]], Dict[str, Any]]:
+    """
+    Get all series on Polymarket. Series are groups of recurring events (e.g., 'BTC Up or Down Hourly').
+    
+    Series aggregate related markets that repeat on a schedule (hourly, daily, weekly).
+
+    Generated from OpenAPI endpoint: GET /series
+
+    Args:
+        context: MCP context (auto-injected by framework, not user-provided)
+        limit: Maximum number of series to return (optional, default: 100)
+        offset: Offset for pagination (optional, default: 0)
+        active: Filter for active series only (optional, default: True)
+
+    Returns:
+        List of series with:
+        - id: Series ID (use with list_events series_id parameter)
+        - ticker: Short identifier
+        - title: Display name (e.g., 'BTC Up or Down Hourly')
+        - seriesType: Type of series (e.g., 'single')
+        - recurrence: How often events repeat (e.g., 'hourly', 'daily')
+        - events: Array of events in this series
+        - volume: Total volume traded across all events
+        - liquidity: Current liquidity
+
+    Example Usage:
+        # Get all active series
+        series = await list_series(active=True)
+        
+        # Find hourly crypto series
+        crypto_hourly = [s for s in series if s['recurrence'] == 'hourly']
+        
+        # Get events for a specific series:
+        # await list_events(series_id=series['id'])
+    """
+    # Payment already verified by @require_payment_for_tool decorator
+    api_key = get_active_api_key(context)
+
+    try:
+        url = f"https://gamma-api.polymarket.com/series"
+        params = {
+            "limit": limit,
+            "offset": offset,
+            "active": str(active).lower()
+        }
+        params = {k: v for k, v in params.items() if v is not None}
+        headers = {}
+
+        response = requests.get(
+            url,
+            params=params,
+            headers=headers,
+            timeout=30
+        )
+        response.raise_for_status()
+
+        return response.json()
+
+    except Exception as e:
+        logger.error(f"Error in list_series: {e}")
+        return {"error": str(e), "endpoint": "/series"}
+
+
+@mcp.tool()
+@require_payment_for_tool(
+    price=TokenAmount(
+        amount="50000000000000",  # 5e-05 tokens
+        asset=TokenAsset(
+            address="0x3e17730bb2ca51a8D5deD7E44c003A2e95a4d822",
+            decimals=6,
+            network="sepolia",
+            eip712=EIP712Domain(
+                name="IATPWallet",
+                version="1"
+            )
+        )
+    ),
+    description="Get comments on a specific event or market"
+
+)
+async def get_comments(
+    context: Context,
+    parent_entity_id: str,
+    entity_type: str = "event",
+    limit: int = 50,
+    offset: int = 0
+) -> Union[List[Dict[str, Any]], Dict[str, Any]]:
+    """
+    Get comments on a specific event or market.
+
+    Generated from OpenAPI endpoint: GET /comments
+
+    Args:
+        context: MCP context (auto-injected by framework, not user-provided)
+        parent_entity_id: ID of the event or market to get comments for (required)
+        entity_type: Type of entity - 'event' or 'market' (optional, default: 'event')
+        limit: Maximum number of comments to return (optional, default: 50)
+        offset: Offset for pagination (optional, default: 0)
+
+    Returns:
+        List of comments with user info, content, and timestamps
+
+    Example Usage:
+        # Get comments on an event
+        comments = await get_comments(parent_entity_id="123456", entity_type="event")
+    """
+    # Payment already verified by @require_payment_for_tool decorator
+    api_key = get_active_api_key(context)
+
+    try:
+        url = f"https://gamma-api.polymarket.com/comments"
+        params = {
+            "parent_entity_id": parent_entity_id,
+            "entity_entity_type": entity_type,
+            "limit": limit,
+            "offset": offset
+        }
+        params = {k: v for k, v in params.items() if v is not None}
+        headers = {}
+
+        response = requests.get(
+            url,
+            params=params,
+            headers=headers,
+            timeout=30
+        )
+        response.raise_for_status()
+
+        return response.json()
+
+    except Exception as e:
+        logger.error(f"Error in get_comments: {e}")
+        return {"error": str(e), "endpoint": "/comments"}
+
+
+@mcp.tool()
+@require_payment_for_tool(
+    price=TokenAmount(
+        amount="50000000000000",  # 5e-05 tokens
+        asset=TokenAsset(
+            address="0x3e17730bb2ca51a8D5deD7E44c003A2e95a4d822",
+            decimals=6,
+            network="sepolia",
+            eip712=EIP712Domain(
+                name="IATPWallet",
+                version="1"
+            )
+        )
+    ),
+    description="Get a user profile by address"
+
+)
+async def get_profile(
+    context: Context,
+    address: str
+) -> Dict[str, Any]:
+    """
+    Get a user profile by wallet address.
+
+    Generated from OpenAPI endpoint: GET /profiles/{address}
+
+    Args:
+        context: MCP context (auto-injected by framework, not user-provided)
+        address: Wallet address of the user profile to fetch (required)
+
+    Returns:
+        User profile with username, bio, stats, and activity
+
+    Example Usage:
+        profile = await get_profile(address="0x1234...")
+    """
+    # Payment already verified by @require_payment_for_tool decorator
+    api_key = get_active_api_key(context)
+
+    try:
+        url = f"https://gamma-api.polymarket.com/profiles/{address}"
+        params = {}
+        headers = {}
+
+        response = requests.get(
+            url,
+            params=params,
+            headers=headers,
+            timeout=30
+        )
+        response.raise_for_status()
+
+        return response.json()
+
+    except Exception as e:
+        logger.error(f"Error in get_profile: {e}")
+        return {"error": str(e), "endpoint": f"/profiles/{address}"}
+
+
+@mcp.tool()
+@require_payment_for_tool(
+    price=TokenAmount(
         amount="100000000000000",  # 0.0001 tokens
         asset=TokenAsset(
             address="0x3e17730bb2ca51a8D5deD7E44c003A2e95a4d822",
