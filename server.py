@@ -267,20 +267,32 @@ def derive_polymarket_credentials_internal(private_key: str) -> ApiCreds:
     Derive Polymarket API credentials from a private key.
     
     This is used internally by the session middleware to derive and cache credentials.
+    Following Polymarket docs: https://docs.polymarket.com/quickstart/first-order
+    
+    Uses signature_type=0 (EOA) for direct wallet trading.
     """
     try:
-        # Create a temporary client just for deriving credentials
+        from eth_account import Account
+        
+        # Get the funder address (the wallet address derived from the private key)
+        account = Account.from_key(private_key)
+        funder_address = account.address
+        
+        # Create a temporary client for credential derivation
+        # signature_type=0 is for EOA wallets (user controls their own wallet)
         temp_client = ClobClient(
             host="https://clob.polymarket.com",
             chain_id=137,
             key=private_key,
-            signature_type=2  # EOA signature
+            signature_type=0,  # EOA signature (Type 0 per Polymarket docs)
+            funder=funder_address  # Funder is the EOA wallet address
         )
         
-        # Derive the API credentials
-        creds = temp_client.derive_api_key()
+        # Use create_or_derive_api_creds as recommended by Polymarket docs
+        # This creates a new key if none exists, or derives existing one
+        creds = temp_client.create_or_derive_api_creds()
         
-        logger.info(f"✅ Successfully derived Polymarket API credentials")
+        logger.info(f"✅ Successfully derived Polymarket API credentials for {funder_address[:10]}...")
         return creds
         
     except Exception as e:
@@ -329,31 +341,48 @@ def get_session_credentials(context: Context) -> Optional[Tuple[str, ApiCreds]]:
 # API Endpoint Tool Implementations
 # ============================================================================
 
-def create_authenticated_clob_client(operator_private_key: str) -> ClobClient:
+def create_authenticated_clob_client(operator_private_key: str, creds: Optional[ApiCreds] = None) -> ClobClient:
     """
     Create an authenticated ClobClient from a private key.
     
-    Derives API credentials and returns a fully initialized client ready for trading.
-    This simplifies trading endpoints - they only need the private key.
+    Following Polymarket docs: https://docs.polymarket.com/quickstart/first-order
+    
+    Uses signature_type=0 (EOA) with funder set to the wallet address.
+    
+    Args:
+        operator_private_key: The private key for signing
+        creds: Optional pre-derived API credentials. If None, will create/derive them.
+    
+    Returns:
+        Fully initialized ClobClient ready for trading
     """
-    # First create a client just for deriving credentials
-    temp_client = ClobClient(
-        host="https://clob.polymarket.com",
-        chain_id=137,
-        key=operator_private_key,
-        signature_type=2  # EOA signature
-    )
+    from eth_account import Account
     
-    # Derive the API credentials
-    creds = temp_client.derive_api_key()
+    # Get funder address from private key
+    account = Account.from_key(operator_private_key)
+    funder_address = account.address
     
-    # Now create the full client with both key and creds
+    if creds is None:
+        # Create client for deriving credentials
+        temp_client = ClobClient(
+            host="https://clob.polymarket.com",
+            chain_id=137,
+            key=operator_private_key,
+            signature_type=0,  # EOA signature (Type 0 per Polymarket docs)
+            funder=funder_address
+        )
+        
+        # Use create_or_derive as recommended by Polymarket docs
+        creds = temp_client.create_or_derive_api_creds()
+    
+    # Create the full client with credentials
     client = ClobClient(
         host="https://clob.polymarket.com",
         chain_id=137,
         key=operator_private_key,
         creds=creds,
-        signature_type=2  # EOA signature
+        signature_type=0,  # EOA signature (Type 0)
+        funder=funder_address
     )
     
     return client
@@ -406,27 +435,35 @@ async def derive_polymarket_credentials(
         }
 
     try:
-        # Initialize CLOB client with the agent's private key
-        # Using Polygon mainnet (chain_id=137) for production
-        # signature_type=2 for EOA wallets
+        from eth_account import Account
+        
+        # Get funder address from private key
+        account = Account.from_key(operator_private_key)
+        funder_address = account.address
+        
+        # Initialize CLOB client following Polymarket docs:
+        # https://docs.polymarket.com/quickstart/first-order
+        # signature_type=0 for EOA wallets, funder = wallet address
         client = ClobClient(
             host="https://clob.polymarket.com",
             chain_id=137,
             key=operator_private_key,
-            signature_type=2  # EOA signature type
+            signature_type=0,  # EOA signature type (Type 0)
+            funder=funder_address
         )
         
-        # Derive API credentials from the private key
-        # Use derive_api_key() which works for registered accounts
-        api_creds = client.derive_api_key()
+        # Use create_or_derive_api_creds as recommended by Polymarket docs
+        # This creates a new key if none exists, or derives existing one
+        api_creds = client.create_or_derive_api_creds()
         
-        logger.info(f"Successfully derived Polymarket credentials for agent")
+        logger.info(f"Successfully derived Polymarket credentials for {funder_address[:10]}...")
         
         return {
             "success": True,
             "api_key": api_creds.api_key,
             "api_secret": api_creds.api_secret,
             "api_passphrase": api_creds.api_passphrase,
+            "wallet_address": funder_address,
             "note": "Store these credentials securely. Use them for all trading endpoints."
         }
 
@@ -1191,13 +1228,7 @@ async def get_trades(
             }
         
         private_key, creds = session_creds
-        client = ClobClient(
-            host="https://clob.polymarket.com",
-            chain_id=137,
-            key=private_key,
-            creds=creds,
-            signature_type=2
-        )
+        client = create_authenticated_clob_client(private_key, creds)
         
         # Use py-clob-client to get trades
         from py_clob_client.clob_types import TradeParams
@@ -1360,12 +1391,22 @@ async def create_order(
             }
         
         private_key, creds = session_creds
+        
+        # Get funder address from private key (EOA wallet address)
+        from eth_account import Account
+        account = Account.from_key(private_key)
+        funder_address = account.address
+        
+        # Create client with correct signature type and funder per Polymarket docs:
+        # https://docs.polymarket.com/quickstart/first-order
+        # Type 0 = EOA wallet, funder = your wallet address
         client = ClobClient(
             host="https://clob.polymarket.com",
             chain_id=137,
             key=private_key,
             creds=creds,
-            signature_type=2
+            signature_type=0,  # EOA signature type
+            funder=funder_address  # Required for order signing
         )
         
         # Build and submit order using OrderArgs
@@ -1459,12 +1500,19 @@ async def create_market_order(
             }
         
         private_key, creds = session_creds
+        
+        # Get funder address from private key
+        from eth_account import Account
+        account = Account.from_key(private_key)
+        funder_address = account.address
+        
         client = ClobClient(
             host="https://clob.polymarket.com",
             chain_id=137,
             key=private_key,
             creds=creds,
-            signature_type=2
+            signature_type=0,  # EOA signature type
+            funder=funder_address
         )
         
         # Build market order args
@@ -1541,13 +1589,7 @@ async def cancel_order(
             }
         
         private_key, creds = session_creds
-        client = ClobClient(
-            host="https://clob.polymarket.com",
-            chain_id=137,
-            key=private_key,
-            creds=creds,
-            signature_type=2
-        )
+        client = create_authenticated_clob_client(private_key, creds)
         
         # Cancel the order
         result = client.cancel(order_id)
@@ -1613,13 +1655,7 @@ async def get_orders(
             }
         
         private_key, creds = session_creds
-        client = ClobClient(
-            host="https://clob.polymarket.com",
-            chain_id=137,
-            key=private_key,
-            creds=creds,
-            signature_type=2
-        )
+        client = create_authenticated_clob_client(private_key, creds)
         
         # Get orders with optional filters
         from py_clob_client.clob_types import OpenOrderParams
@@ -1686,13 +1722,7 @@ async def cancel_all_orders(
             }
         
         private_key, creds = session_creds
-        client = ClobClient(
-            host="https://clob.polymarket.com",
-            chain_id=137,
-            key=private_key,
-            creds=creds,
-            signature_type=2
-        )
+        client = create_authenticated_clob_client(private_key, creds)
         
         # Cancel all orders
         result = client.cancel_all()
@@ -1756,16 +1786,10 @@ async def get_balance(
             }
         
         private_key, creds = session_creds
-        client = ClobClient(
-            host="https://clob.polymarket.com",
-            chain_id=137,
-            key=private_key,
-            creds=creds,
-            signature_type=2
-        )
+        client = create_authenticated_clob_client(private_key, creds)
         
         # 1. Get COLLATERAL (USDC cash) balance - "Cash Balance" in Polymarket UI
-        cash_params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL, signature_type=2)  # type: ignore
+        cash_params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL, signature_type=0)  # type: ignore
         cash_balance = client.get_balance_allowance(cash_params)
         
         # Parse cash balance
@@ -1914,13 +1938,7 @@ async def get_positions(
             }
         
         private_key, creds = session_creds
-        client = ClobClient(
-            host="https://clob.polymarket.com",
-            chain_id=137,
-            key=private_key,
-            creds=creds,
-            signature_type=2
-        )
+        client = create_authenticated_clob_client(private_key, creds)
         
         # Get trades which show positions
         trades = client.get_trades()
@@ -1984,13 +2002,7 @@ async def get_order(
             }
         
         private_key, creds = session_creds
-        client = ClobClient(
-            host="https://clob.polymarket.com",
-            chain_id=137,
-            key=private_key,
-            creds=creds,
-            signature_type=2
-        )
+        client = create_authenticated_clob_client(private_key, creds)
         
         order = client.get_order(order_id)
         
@@ -2048,13 +2060,7 @@ async def cancel_orders(
             }
         
         private_key, creds = session_creds
-        client = ClobClient(
-            host="https://clob.polymarket.com",
-            chain_id=137,
-            key=private_key,
-            creds=creds,
-            signature_type=2
-        )
+        client = create_authenticated_clob_client(private_key, creds)
         
         # Parse comma-separated order IDs
         ids = [id.strip() for id in order_ids.split(",") if id.strip()]
@@ -2118,13 +2124,7 @@ async def cancel_market_orders(
             }
         
         private_key, creds = session_creds
-        client = ClobClient(
-            host="https://clob.polymarket.com",
-            chain_id=137,
-            key=private_key,
-            creds=creds,
-            signature_type=2
-        )
+        client = create_authenticated_clob_client(private_key, creds)
         
         # Pass only non-None values to cancel_market_orders
         kwargs = {}
@@ -2191,13 +2191,7 @@ async def update_balance_allowance(
             }
         
         private_key, creds = session_creds
-        client = ClobClient(
-            host="https://clob.polymarket.com",
-            chain_id=137,
-            key=private_key,
-            creds=creds,
-            signature_type=2
-        )
+        client = create_authenticated_clob_client(private_key, creds)
         
         result = client.update_balance_allowance()
         
@@ -2255,13 +2249,7 @@ async def get_notifications(
             }
         
         private_key, creds = session_creds
-        client = ClobClient(
-            host="https://clob.polymarket.com",
-            chain_id=137,
-            key=private_key,
-            creds=creds,
-            signature_type=2
-        )
+        client = create_authenticated_clob_client(private_key, creds)
         
         notifications = client.get_notifications()
         
@@ -2318,13 +2306,7 @@ async def drop_notifications(
             }
         
         private_key, creds = session_creds
-        client = ClobClient(
-            host="https://clob.polymarket.com",
-            chain_id=137,
-            key=private_key,
-            creds=creds,
-            signature_type=2
-        )
+        client = create_authenticated_clob_client(private_key, creds)
         
         result = client.drop_notifications()
         
@@ -2389,13 +2371,7 @@ async def post_orders(
             }
         
         private_key, creds = session_creds
-        client = ClobClient(
-            host="https://clob.polymarket.com",
-            chain_id=137,
-            key=private_key,
-            creds=creds,
-            signature_type=2
-        )
+        client = create_authenticated_clob_client(private_key, creds)
         
         # Parse orders JSON
         orders_data = json.loads(orders_json)
