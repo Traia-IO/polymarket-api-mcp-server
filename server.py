@@ -101,6 +101,13 @@ logger.info(f"✅ FastMCP server created")
 # Thread-safe storage for session-scoped Polymarket credentials.
 # Credentials are derived once when client sends X-Polymarket-Key header
 # and cached for the duration of the MCP session.
+#
+# Clients can configure signature type and funder address via headers:
+#   X-Polymarket-Key: Private key for signing
+#   X-Polymarket-Signature-Type: 0 (EOA), 1 (POLY_PROXY), or 2 (GNOSIS_SAFE)
+#   X-Polymarket-Funder: Funder address (required for types 1 and 2)
+#
+# See: https://docs.polymarket.com/quickstart/first-order
 
 from threading import Lock
 
@@ -111,11 +118,32 @@ class SessionCredentialStore:
         self._credentials: Dict[str, Dict[str, Any]] = {}
         self._lock = Lock()
     
-    def store(self, session_id: str, creds: ApiCreds, private_key: str) -> None:
-        """Store credentials for a session."""
+    def store(
+        self,
+        session_id: str,
+        creds: ApiCreds,
+        private_key: str,
+        signature_type: int = 0,
+        funder_address: Optional[str] = None
+    ) -> None:
+        """
+        Store credentials for a session.
+        
+        Args:
+            session_id: The MCP session ID
+            creds: Derived Polymarket API credentials
+            private_key: The private key used for signing
+            signature_type: 0=EOA, 1=POLY_PROXY, 2=GNOSIS_SAFE
+            funder_address: Address that holds funds (EOA or proxy wallet)
+        """
         with self._lock:
-            self._credentials[session_id] = {"creds": creds, "key": private_key}
-            logger.info(f"🔐 Stored Polymarket credentials for session {session_id[:8]}...")
+            self._credentials[session_id] = {
+                "creds": creds,
+                "key": private_key,
+                "signature_type": signature_type,
+                "funder_address": funder_address
+            }
+            logger.info(f"🔐 Stored Polymarket credentials for session {session_id[:8]}... (sig_type={signature_type})")
     
     def get(self, session_id: str) -> Optional[Dict[str, Any]]:
         """Get credentials for a session."""
@@ -225,34 +253,101 @@ async def startup_geoblock_check():
 # ============================================================================
 # POLYMARKET AUTH MIDDLEWARE
 # ============================================================================
-# Intercepts requests with X-Polymarket-Key header and derives/caches credentials
+# Intercepts requests with Polymarket auth headers and derives/caches credentials
+#
+# IATP supports multiple headers via additional_headers: Dict[str, str]
+# Pass these headers when initializing the D402MCPToolAdapter:
+#
+#   X-Polymarket-Key: Private key for signing (required for auth endpoints)
+#   X-Polymarket-Signature-Type: 0 (EOA), 1 (POLY_PROXY), or 2 (GNOSIS_SAFE)
+#   X-Polymarket-Funder: Funder address (required for types 1 and 2)
+#
+# Example with IATP:
+#   adapter = D402MCPToolAdapter(
+#       url="...",
+#       account=operator_account,
+#       wallet_address=wallet,
+#       additional_headers={
+#           "X-Polymarket-Key": "0x...",
+#           "X-Polymarket-Signature-Type": "2",
+#           "X-Polymarket-Funder": "0x..."
+#       }
+#   )
+#
+# ALTERNATIVE: Single JSON header (also supported):
+#   X-Polymarket-Auth: {"key": "0x...", "signature_type": 2, "funder": "0x..."}
+#
+# Signature Types (per https://docs.polymarket.com/quickstart/first-order):
+#   0 = EOA: Direct wallet, funder = your EOA address
+#   1 = POLY_PROXY: Polymarket.com Magic Link account, funder = proxy wallet
+#   2 = GNOSIS_SAFE: Polymarket.com browser wallet, funder = proxy wallet
 
 class PolymarketAuthMiddleware(BaseHTTPMiddleware):
     """
-    Middleware that handles Polymarket authentication via X-Polymarket-Key header.
+    Middleware that handles Polymarket authentication via headers.
     
-    When a client sends X-Polymarket-Key header (containing their private key),
-    this middleware:
+    Supported headers (via IATP additional_headers):
+    - X-Polymarket-Key: Private key (required)
+    - X-Polymarket-Signature-Type: "0", "1", or "2" (default: "2")
+    - X-Polymarket-Funder: Funder/proxy wallet address (required for types 1/2)
+    
+    Alternative: X-Polymarket-Auth with JSON: {"key": "0x...", "signature_type": 2, "funder": "0x..."}
+    
+    When credentials are received, this middleware:
     1. Derives Polymarket API credentials from the private key
     2. Caches them in the session store for the duration of the session
     3. All subsequent authenticated tool calls use the cached credentials
-    
-    This is Polymarket-specific (not in IATP library) - IATP provides generic
-    additional_headers support.
     """
     
     async def dispatch(self, request: Request, call_next):
-        # Check for Polymarket auth header
-        polymarket_key = request.headers.get("X-Polymarket-Key")
         session_id = request.headers.get("mcp-session-id")
+        
+        # Initialize auth values
+        polymarket_key = None
+        signature_type = 2  # Default to GNOSIS_SAFE
+        funder_address = None
+        
+        # OPTION 1: Single JSON header (preferred for IATP)
+        polymarket_auth = request.headers.get("X-Polymarket-Auth")
+        if polymarket_auth:
+            try:
+                auth_config = json.loads(polymarket_auth)
+                polymarket_key = auth_config.get("key")
+                signature_type = auth_config.get("signature_type", 2)
+                funder_address = auth_config.get("funder")
+                logger.debug(f"Parsed X-Polymarket-Auth JSON header")
+            except json.JSONDecodeError as e:
+                logger.warning(f"Failed to parse X-Polymarket-Auth as JSON: {e}")
+        
+        # OPTION 2: Multiple headers (fallback)
+        if not polymarket_key:
+            polymarket_key = request.headers.get("X-Polymarket-Key")
+            sig_type_str = request.headers.get("X-Polymarket-Signature-Type", "2")
+            funder_address = request.headers.get("X-Polymarket-Funder") or funder_address
+            
+            try:
+                signature_type = int(sig_type_str)
+                if signature_type not in [0, 1, 2]:
+                    signature_type = 2
+            except ValueError:
+                signature_type = 2
         
         if polymarket_key and session_id:
             # Only derive if we don't already have credentials for this session
             if not session_credential_store.has_credentials(session_id):
                 try:
-                    logger.info(f"🔑 Received X-Polymarket-Key for session {session_id[:8]}...")
-                    creds = derive_polymarket_credentials_internal(polymarket_key)
-                    session_credential_store.store(session_id, creds, polymarket_key)
+                    from eth_account import Account
+                    account = Account.from_key(polymarket_key)
+                    
+                    # If no funder address provided, use EOA
+                    if not funder_address:
+                        funder_address = account.address
+                        if signature_type != 0:
+                            logger.warning(f"⚠️  No funder provided for sig_type={signature_type}. Using EOA. This may cause signature errors for Polymarket.com accounts.")
+                    
+                    logger.info(f"🔑 Polymarket auth for session {session_id[:8]}... (sig_type={signature_type}, funder={funder_address[:10]}...)")
+                    creds = derive_polymarket_credentials_internal(polymarket_key, signature_type, funder_address)
+                    session_credential_store.store(session_id, creds, polymarket_key, signature_type, funder_address)
                 except Exception as e:
                     logger.error(f"Failed to derive Polymarket credentials: {e}")
                     # Continue with the request even if credential derivation fails
@@ -262,37 +357,52 @@ class PolymarketAuthMiddleware(BaseHTTPMiddleware):
         return response
 
 
-def derive_polymarket_credentials_internal(private_key: str) -> ApiCreds:
+def derive_polymarket_credentials_internal(
+    private_key: str,
+    signature_type: int = 2,
+    funder_address: Optional[str] = None
+) -> ApiCreds:
     """
     Derive Polymarket API credentials from a private key.
     
     This is used internally by the session middleware to derive and cache credentials.
     Following Polymarket docs: https://docs.polymarket.com/quickstart/first-order
     
-    Uses signature_type=0 (EOA) for direct wallet trading.
+    Args:
+        private_key: The Ethereum private key
+        signature_type: 0=EOA, 1=POLY_PROXY, 2=GNOSIS_SAFE (default: 2)
+        funder_address: Address that holds funds (required for types 1/2)
+    
+    Returns:
+        ApiCreds object with api_key, api_secret, api_passphrase
     """
     try:
         from eth_account import Account
         
-        # Get the funder address (the wallet address derived from the private key)
+        # Get the EOA address from the private key
         account = Account.from_key(private_key)
-        funder_address = account.address
+        
+        # If no funder address provided, use EOA
+        if not funder_address:
+            funder_address = account.address
+        
+        # Ensure funder_address is set
+        assert funder_address is not None, "funder_address must be provided"
         
         # Create a temporary client for credential derivation
-        # signature_type=0 is for EOA wallets (user controls their own wallet)
         temp_client = ClobClient(
             host="https://clob.polymarket.com",
             chain_id=137,
             key=private_key,
-            signature_type=0,  # EOA signature (Type 0 per Polymarket docs)
-            funder=funder_address  # Funder is the EOA wallet address
+            signature_type=signature_type,
+            funder=funder_address
         )
         
         # Use create_or_derive_api_creds as recommended by Polymarket docs
         # This creates a new key if none exists, or derives existing one
         creds = temp_client.create_or_derive_api_creds()
         
-        logger.info(f"✅ Successfully derived Polymarket API credentials for {funder_address[:10]}...")
+        logger.info(f"✅ Derived Polymarket credentials (sig_type={signature_type}, funder={funder_address[:10]}...)")
         return creds
         
     except Exception as e:
@@ -300,12 +410,12 @@ def derive_polymarket_credentials_internal(private_key: str) -> ApiCreds:
         raise
 
 
-def get_session_credentials(context: Context) -> Optional[Tuple[str, ApiCreds]]:
+def get_session_credentials(context: Context) -> Optional[Tuple[str, ApiCreds, int, str]]:
     """
     Get Polymarket credentials from session store based on the current request's session ID.
     
     Returns:
-        Tuple of (private_key, ApiCreds) if credentials exist, None otherwise
+        Tuple of (private_key, ApiCreds, signature_type, funder_address) if credentials exist, None otherwise
     """
     try:
         # Debug: Log what we have in context
@@ -323,7 +433,12 @@ def get_session_credentials(context: Context) -> Optional[Tuple[str, ApiCreds]]:
                     stored = session_credential_store.get(session_id)
                     if stored:
                         logger.info(f"✅ Found session credentials for {session_id[:8]}...")
-                        return stored["key"], stored["creds"]
+                        return (
+                            stored["key"],
+                            stored["creds"],
+                            stored.get("signature_type", 2),
+                            stored.get("funder_address", "")
+                        )
                     else:
                         logger.warning(f"⚠️  No credentials found for session {session_id[:8]}...")
             else:
@@ -341,26 +456,38 @@ def get_session_credentials(context: Context) -> Optional[Tuple[str, ApiCreds]]:
 # API Endpoint Tool Implementations
 # ============================================================================
 
-def create_authenticated_clob_client(operator_private_key: str, creds: Optional[ApiCreds] = None) -> ClobClient:
+def create_authenticated_clob_client(
+    operator_private_key: str,
+    creds: Optional[ApiCreds] = None,
+    signature_type: int = 2,
+    funder_address: Optional[str] = None
+) -> ClobClient:
     """
     Create an authenticated ClobClient from a private key.
     
     Following Polymarket docs: https://docs.polymarket.com/quickstart/first-order
     
-    Uses signature_type=0 (EOA) with funder set to the wallet address.
-    
     Args:
         operator_private_key: The private key for signing
         creds: Optional pre-derived API credentials. If None, will create/derive them.
+        signature_type: 0=EOA, 1=POLY_PROXY, 2=GNOSIS_SAFE (default: 2)
+        funder_address: Address that holds funds. For EOA use wallet address,
+                        for POLY_PROXY/GNOSIS_SAFE use proxy wallet address.
     
     Returns:
         Fully initialized ClobClient ready for trading
     """
     from eth_account import Account
     
-    # Get funder address from private key
+    # Get EOA address from private key
     account = Account.from_key(operator_private_key)
-    funder_address = account.address
+    
+    # Default funder to EOA if not provided
+    if not funder_address:
+        funder_address = account.address
+    
+    # Ensure funder_address is set (for type checker)
+    assert funder_address is not None
     
     if creds is None:
         # Create client for deriving credentials
@@ -368,7 +495,7 @@ def create_authenticated_clob_client(operator_private_key: str, creds: Optional[
             host="https://clob.polymarket.com",
             chain_id=137,
             key=operator_private_key,
-            signature_type=0,  # EOA signature (Type 0 per Polymarket docs)
+            signature_type=signature_type,
             funder=funder_address
         )
         
@@ -381,7 +508,7 @@ def create_authenticated_clob_client(operator_private_key: str, creds: Optional[
         chain_id=137,
         key=operator_private_key,
         creds=creds,
-        signature_type=0,  # EOA signature (Type 0)
+        signature_type=signature_type,
         funder=funder_address
     )
     
@@ -1227,8 +1354,8 @@ async def get_trades(
                 "message": "Initialize session with X-Polymarket-Key header containing your Polymarket private key"
             }
         
-        private_key, creds = session_creds
-        client = create_authenticated_clob_client(private_key, creds)
+        private_key, creds, sig_type, funder = session_creds
+        client = create_authenticated_clob_client(private_key, creds, sig_type, funder)
         
         # Use py-clob-client to get trades
         from py_clob_client.clob_types import TradeParams
@@ -1390,24 +1517,8 @@ async def create_order(
                 "message": "Initialize session with X-Polymarket-Key header containing your Polymarket private key"
             }
         
-        private_key, creds = session_creds
-        
-        # Get funder address from private key (EOA wallet address)
-        from eth_account import Account
-        account = Account.from_key(private_key)
-        funder_address = account.address
-        
-        # Create client with correct signature type and funder per Polymarket docs:
-        # https://docs.polymarket.com/quickstart/first-order
-        # Type 0 = EOA wallet, funder = your wallet address
-        client = ClobClient(
-            host="https://clob.polymarket.com",
-            chain_id=137,
-            key=private_key,
-            creds=creds,
-            signature_type=0,  # EOA signature type
-            funder=funder_address  # Required for order signing
-        )
+        private_key, creds, sig_type, funder = session_creds
+        client = create_authenticated_clob_client(private_key, creds, sig_type, funder)
         
         # Build and submit order using OrderArgs
         from py_clob_client.clob_types import OrderArgs
@@ -1499,21 +1610,8 @@ async def create_market_order(
                 "message": "Initialize session with X-Polymarket-Key header containing your Polymarket private key"
             }
         
-        private_key, creds = session_creds
-        
-        # Get funder address from private key
-        from eth_account import Account
-        account = Account.from_key(private_key)
-        funder_address = account.address
-        
-        client = ClobClient(
-            host="https://clob.polymarket.com",
-            chain_id=137,
-            key=private_key,
-            creds=creds,
-            signature_type=0,  # EOA signature type
-            funder=funder_address
-        )
+        private_key, creds, sig_type, funder = session_creds
+        client = create_authenticated_clob_client(private_key, creds, sig_type, funder)
         
         # Build market order args
         from py_clob_client.clob_types import MarketOrderArgs
@@ -1588,8 +1686,8 @@ async def cancel_order(
                 "message": "Initialize session with X-Polymarket-Key header containing your Polymarket private key"
             }
         
-        private_key, creds = session_creds
-        client = create_authenticated_clob_client(private_key, creds)
+        private_key, creds, sig_type, funder = session_creds
+        client = create_authenticated_clob_client(private_key, creds, sig_type, funder)
         
         # Cancel the order
         result = client.cancel(order_id)
@@ -1654,8 +1752,8 @@ async def get_orders(
                 "message": "Initialize session with X-Polymarket-Key header containing your Polymarket private key"
             }
         
-        private_key, creds = session_creds
-        client = create_authenticated_clob_client(private_key, creds)
+        private_key, creds, sig_type, funder = session_creds
+        client = create_authenticated_clob_client(private_key, creds, sig_type, funder)
         
         # Get orders with optional filters
         from py_clob_client.clob_types import OpenOrderParams
@@ -1721,8 +1819,8 @@ async def cancel_all_orders(
                 "message": "Initialize session with X-Polymarket-Key header containing your Polymarket private key"
             }
         
-        private_key, creds = session_creds
-        client = create_authenticated_clob_client(private_key, creds)
+        private_key, creds, sig_type, funder = session_creds
+        client = create_authenticated_clob_client(private_key, creds, sig_type, funder)
         
         # Cancel all orders
         result = client.cancel_all()
@@ -1785,8 +1883,8 @@ async def get_balance(
                 "message": "Initialize session with X-Polymarket-Key header containing your Polymarket private key"
             }
         
-        private_key, creds = session_creds
-        client = create_authenticated_clob_client(private_key, creds)
+        private_key, creds, sig_type, funder = session_creds
+        client = create_authenticated_clob_client(private_key, creds, sig_type, funder)
         
         # 1. Get COLLATERAL (USDC cash) balance - "Cash Balance" in Polymarket UI
         cash_params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL, signature_type=0)  # type: ignore
@@ -1937,8 +2035,8 @@ async def get_positions(
                 "message": "Initialize session with X-Polymarket-Key header containing your Polymarket private key"
             }
         
-        private_key, creds = session_creds
-        client = create_authenticated_clob_client(private_key, creds)
+        private_key, creds, sig_type, funder = session_creds
+        client = create_authenticated_clob_client(private_key, creds, sig_type, funder)
         
         # Get trades which show positions
         trades = client.get_trades()
@@ -2001,8 +2099,8 @@ async def get_order(
                 "message": "Initialize session with X-Polymarket-Key header containing your Polymarket private key"
             }
         
-        private_key, creds = session_creds
-        client = create_authenticated_clob_client(private_key, creds)
+        private_key, creds, sig_type, funder = session_creds
+        client = create_authenticated_clob_client(private_key, creds, sig_type, funder)
         
         order = client.get_order(order_id)
         
@@ -2059,8 +2157,8 @@ async def cancel_orders(
                 "message": "Initialize session with X-Polymarket-Key header containing your Polymarket private key"
             }
         
-        private_key, creds = session_creds
-        client = create_authenticated_clob_client(private_key, creds)
+        private_key, creds, sig_type, funder = session_creds
+        client = create_authenticated_clob_client(private_key, creds, sig_type, funder)
         
         # Parse comma-separated order IDs
         ids = [id.strip() for id in order_ids.split(",") if id.strip()]
@@ -2123,8 +2221,8 @@ async def cancel_market_orders(
                 "message": "Initialize session with X-Polymarket-Key header containing your Polymarket private key"
             }
         
-        private_key, creds = session_creds
-        client = create_authenticated_clob_client(private_key, creds)
+        private_key, creds, sig_type, funder = session_creds
+        client = create_authenticated_clob_client(private_key, creds, sig_type, funder)
         
         # Pass only non-None values to cancel_market_orders
         kwargs = {}
@@ -2190,8 +2288,8 @@ async def update_balance_allowance(
                 "message": "Initialize session with X-Polymarket-Key header containing your Polymarket private key"
             }
         
-        private_key, creds = session_creds
-        client = create_authenticated_clob_client(private_key, creds)
+        private_key, creds, sig_type, funder = session_creds
+        client = create_authenticated_clob_client(private_key, creds, sig_type, funder)
         
         # Update balance allowance with proper params (signature_type=0 for EOA)
         from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
@@ -2254,8 +2352,8 @@ async def get_notifications(
                 "message": "Initialize session with X-Polymarket-Key header containing your Polymarket private key"
             }
         
-        private_key, creds = session_creds
-        client = create_authenticated_clob_client(private_key, creds)
+        private_key, creds, sig_type, funder = session_creds
+        client = create_authenticated_clob_client(private_key, creds, sig_type, funder)
         
         notifications = client.get_notifications()
         
@@ -2311,8 +2409,8 @@ async def drop_notifications(
                 "message": "Initialize session with X-Polymarket-Key header containing your Polymarket private key"
             }
         
-        private_key, creds = session_creds
-        client = create_authenticated_clob_client(private_key, creds)
+        private_key, creds, sig_type, funder = session_creds
+        client = create_authenticated_clob_client(private_key, creds, sig_type, funder)
         
         result = client.drop_notifications()
         
@@ -2376,8 +2474,8 @@ async def post_orders(
                 "message": "Initialize session with X-Polymarket-Key header containing your Polymarket private key"
             }
         
-        private_key, creds = session_creds
-        client = create_authenticated_clob_client(private_key, creds)
+        private_key, creds, sig_type, funder = session_creds
+        client = create_authenticated_clob_client(private_key, creds, sig_type, funder)
         
         # Parse orders JSON
         orders_data = json.loads(orders_json)
