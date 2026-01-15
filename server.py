@@ -140,6 +140,88 @@ session_credential_store = SessionCredentialStore()
 
 
 # ============================================================================
+# GEOBLOCK CHECK
+# ============================================================================
+# Check if Polymarket API is accessible from this region
+
+import httpx
+
+# Cache geoblock status (checked once on startup and cached)
+_geoblock_status: Optional[Dict[str, Any]] = None
+_geoblock_check_time: Optional[datetime] = None
+
+async def check_polymarket_geoblock() -> Dict[str, Any]:
+    """
+    Check if Polymarket API is geoblocked from this region.
+    
+    Calls GET https://polymarket.com/api/geoblock to check status.
+    Result is cached for 5 minutes to avoid excessive API calls.
+    
+    Returns:
+        Dict with:
+        - blocked: bool - True if geoblocked
+        - country: str - Country code if available
+        - message: str - Status message
+        - checked_at: str - ISO timestamp
+    """
+    global _geoblock_status, _geoblock_check_time
+    
+    # Return cached result if less than 5 minutes old
+    if _geoblock_status and _geoblock_check_time:
+        age = (datetime.now() - _geoblock_check_time).total_seconds()
+        if age < 300:  # 5 minutes
+            return _geoblock_status
+    
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get("https://polymarket.com/api/geoblock")
+            data = response.json()
+            
+            # Polymarket returns {"blocked": true/false, "country": "XX"}
+            blocked = data.get("blocked", False)
+            country = data.get("country", "unknown")
+            
+            _geoblock_status = {
+                "blocked": blocked,
+                "country": country,
+                "message": f"Region {'blocked' if blocked else 'allowed'}: {country}",
+                "checked_at": datetime.now().isoformat()
+            }
+            _geoblock_check_time = datetime.now()
+            
+            if blocked:
+                logger.warning(f"⚠️ GEOBLOCK: Polymarket API blocked from country {country}")
+            else:
+                logger.info(f"✅ Geoblock check passed: country {country}")
+            
+            return _geoblock_status
+            
+    except Exception as e:
+        logger.error(f"❌ Geoblock check failed: {e}")
+        return {
+            "blocked": False,  # Assume not blocked if check fails
+            "country": "unknown",
+            "message": f"Check failed: {str(e)}",
+            "error": str(e),
+            "checked_at": datetime.now().isoformat()
+        }
+
+
+async def startup_geoblock_check():
+    """Run geoblock check on server startup."""
+    logger.info("🌍 Checking Polymarket geoblock status on startup...")
+    result = await check_polymarket_geoblock()
+    if result.get("blocked"):
+        logger.error("="*60)
+        logger.error("🚫 SERVER IS GEOBLOCKED FROM POLYMARKET!")
+        logger.error(f"   Country: {result.get('country')}")
+        logger.error("   Consider migrating to an allowed region.")
+        logger.error("="*60)
+    else:
+        logger.info(f"✅ Geoblock check passed: {result.get('message')}")
+
+
+# ============================================================================
 # POLYMARKET AUTH MIDDLEWARE
 # ============================================================================
 # Intercepts requests with X-Polymarket-Key header and derives/caches credentials
@@ -155,7 +237,7 @@ class PolymarketAuthMiddleware(BaseHTTPMiddleware):
     3. All subsequent authenticated tool calls use the cached credentials
     
     This is Polymarket-specific (not in IATP library) - IATP provides generic
-    additional_auth_header_key/value support.
+    additional_headers support.
     """
     
     async def dispatch(self, request: Request, call_next):
@@ -3005,19 +3087,40 @@ def create_app_with_middleware():
     # Add health check endpoint (bypasses middleware)
     @app.route("/health", methods=["GET"])
     async def health_check(request: Request) -> JSONResponse:
-        """Health check endpoint for container orchestration."""
+        """Health check endpoint for container orchestration.
+        
+        Includes geoblock check to verify Polymarket API is accessible from this region.
+        """
+        # Check geoblock status
+        geoblock_status = await check_polymarket_geoblock()
+        
+        if geoblock_status.get("blocked"):
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "status": "unhealthy",
+                    "service": "polymarket-api-mcp-server",
+                    "reason": "geoblocked",
+                    "geoblock": geoblock_status,
+                    "timestamp": datetime.now().isoformat()
+                }
+            )
+        
         return JSONResponse(
             content={
                 "status": "healthy",
                 "service": "polymarket-api-mcp-server",
+                "geoblock": geoblock_status,
                 "timestamp": datetime.now().isoformat()
             }
         )
-    logger.info("✅ Added /health endpoint")
+    logger.info("✅ Added /health endpoint with geoblock check")
     
     return app
 
 if __name__ == "__main__":
+    import asyncio
+    
     logger.info("="*80)
     logger.info(f"Starting Polymarket API MCP Server")
     logger.info("="*80)
@@ -3026,6 +3129,9 @@ if __name__ == "__main__":
     logger.info("     - Checks payment → HTTP 402 if missing")
     logger.info("  2. FastMCP processes valid requests with tool decorators")
     logger.info("="*80)
+    
+    # Run geoblock check on startup
+    asyncio.run(startup_geoblock_check())
     
     # Create app with middleware
     app = create_app_with_middleware()
