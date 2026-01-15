@@ -2193,7 +2193,13 @@ async def update_balance_allowance(
         private_key, creds = session_creds
         client = create_authenticated_clob_client(private_key, creds)
         
-        result = client.update_balance_allowance()
+        # Update balance allowance with proper params (signature_type=0 for EOA)
+        from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
+        params = BalanceAllowanceParams(
+            asset_type=AssetType.COLLATERAL,  # type: ignore  # USDC
+            signature_type=0  # EOA signature type
+        )
+        result = client.update_balance_allowance(params)
         
         return {
             "success": True,
