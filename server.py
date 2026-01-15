@@ -1887,7 +1887,7 @@ async def get_balance(
         client = create_authenticated_clob_client(private_key, creds, sig_type, funder)
         
         # 1. Get COLLATERAL (USDC cash) balance - "Cash Balance" in Polymarket UI
-        cash_params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL, signature_type=0)  # type: ignore
+        cash_params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL, signature_type=sig_type)  # type: ignore
         cash_balance = client.get_balance_allowance(cash_params)
         
         # Parse cash balance
@@ -2291,11 +2291,11 @@ async def update_balance_allowance(
         private_key, creds, sig_type, funder = session_creds
         client = create_authenticated_clob_client(private_key, creds, sig_type, funder)
         
-        # Update balance allowance with proper params (signature_type=0 for EOA)
+        # Update balance allowance with proper params
         from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
         params = BalanceAllowanceParams(
             asset_type=AssetType.COLLATERAL,  # type: ignore  # USDC
-            signature_type=0  # EOA signature type
+            signature_type=sig_type  # Use session signature type
         )
         result = client.update_balance_allowance(params)
         
