@@ -215,6 +215,7 @@ async def startup_geoblock_check():
         logger.error("="*60)
         logger.error("🚫 SERVER IS GEOBLOCKED FROM POLYMARKET!")
         logger.error(f"   Country: {result.get('country')}")
+        logger.error("   Trading orders will be blocked in this region.")
         logger.error("   Consider migrating to an allowed region.")
         logger.error("="*60)
     else:
@@ -795,7 +796,7 @@ async def get_prices(
 ) -> Dict[str, Any]:
     """
     Get current price for a specific token (YES or NO outcome).
-    
+
     Prices are between 0-1 representing probability (0.65 = 65% probability).
     Returns midpoint price (average of best bid and ask) plus the spread.
 
