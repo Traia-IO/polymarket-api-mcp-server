@@ -58,10 +58,19 @@ from traia_iatp.d402.types import TokenAmount, TokenAsset, EIP712Domain
 # Configuration
 STAGE = os.getenv("STAGE", "MAINNET").upper()
 PORT = int(os.getenv("PORT", "8000"))
-_server_address = os.getenv("SERVER_ADDRESS")
-if not _server_address:
-    raise ValueError("SERVER_ADDRESS required for payment protocol")
-SERVER_ADDRESS: str = _server_address  # Type assertion after validation
+
+# D402 Payment Protocol - can be disabled via D402_ENABLED=false
+D402_ENABLED = os.getenv("D402_ENABLED", "true").lower() == "true"
+
+if D402_ENABLED:
+    _server_address = os.getenv("SERVER_ADDRESS")
+    if not _server_address:
+        raise ValueError("SERVER_ADDRESS required when D402_ENABLED=true")
+    SERVER_ADDRESS: str = _server_address  # Type assertion after validation
+else:
+    # D402 disabled - use dummy address (middleware won't be added anyway)
+    SERVER_ADDRESS = "0x0000000000000000000000000000000000000001"
+    logger.info("⚠️  D402 DISABLED - No payment required for any tools")
 
 API_KEY = None
 
@@ -3115,13 +3124,17 @@ def create_app_with_middleware():
     # Log D402 configuration with prominent facilitator info
     logger.info("="*60)
     logger.info("D402 Payment Protocol Configuration:")
-    logger.info(f"  Server Address: {SERVER_ADDRESS}")
-    logger.info(f"  Network: {network}")
-    logger.info(f"  Operator Key: {'✅ Set' if operator_key else '❌ Not set'}")
-    logger.info(f"  Testing Mode: {'⚠️  ENABLED (bypasses facilitator)' if testing_mode else '✅ DISABLED (uses facilitator)'}")
+    logger.info(f"  D402 Enabled: {'✅ YES' if D402_ENABLED else '⚠️  NO (free access)'}")
+    if D402_ENABLED:
+        logger.info(f"  Server Address: {SERVER_ADDRESS}")
+        logger.info(f"  Network: {network}")
+        logger.info(f"  Operator Key: {'✅ Set' if operator_key else '❌ Not set'}")
+        logger.info(f"  Testing Mode: {'⚠️  ENABLED (bypasses facilitator)' if testing_mode else '✅ DISABLED (uses facilitator)'}")
+    else:
+        logger.info("  All tools accessible without payment")
     logger.info("="*60)
     
-    if not facilitator_url and not testing_mode:
+    if D402_ENABLED and not facilitator_url and not testing_mode:
         logger.error("❌ FACILITATOR_URL required when testing_mode is disabled!")
         raise ValueError("Set FACILITATOR_URL or enable D402_TESTING_MODE=true")
     
@@ -3146,19 +3159,23 @@ def create_app_with_middleware():
     )
     logger.info("✅ Added CORS middleware (allow all origins, expose mcp-session-id)")
     
-    # Add D402 payment middleware with extracted configs
-    app.add_middleware(
-        D402PaymentMiddleware,
-        tool_payment_configs=tool_payment_configs,
-        server_address=SERVER_ADDRESS,
-        requires_auth=False,  # Only checks payment
-        testing_mode=testing_mode,
-        facilitator_url=facilitator_url,
-        facilitator_api_key=os.getenv("D402_FACILITATOR_API_KEY"),
-        server_name="polymarket-api-mcp-server"  # MCP server ID for tracking
-    )
-    logger.info("✅ Added D402PaymentMiddleware")
-    logger.info("   - Payment-only mode")
+    # Add D402 payment middleware with extracted configs (only if D402 enabled)
+    if D402_ENABLED:
+        app.add_middleware(
+            D402PaymentMiddleware,
+            tool_payment_configs=tool_payment_configs,
+            server_address=SERVER_ADDRESS,
+            requires_auth=False,  # Only checks payment
+            testing_mode=testing_mode,
+            facilitator_url=facilitator_url,
+            facilitator_api_key=os.getenv("D402_FACILITATOR_API_KEY"),
+            server_name="polymarket-api-mcp-server"  # MCP server ID for tracking
+        )
+        logger.info("✅ Added D402PaymentMiddleware")
+        logger.info("   - Payment-only mode")
+    else:
+        logger.info("⚠️  D402 DISABLED - Skipping D402PaymentMiddleware")
+        logger.info("   - All tools accessible without payment")
     
     # Add Polymarket auth middleware to handle X-Polymarket-Key header
     # This derives and caches Polymarket API credentials for the session
