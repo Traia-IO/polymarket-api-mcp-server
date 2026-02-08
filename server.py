@@ -1629,7 +1629,8 @@ async def create_market_order(
         order_side = BUY if side.upper() == "BUY" else SELL
         
         # Create market order args
-        # price=0 means execute at best available market price (no limit)
+        # For market orders: amount is in USDC for BUY, shares for SELL
+        # price field is the worst acceptable price (0 = no limit)
         market_order_args = MarketOrderArgs(
             token_id=token_id,
             amount=float(amount),
@@ -1637,14 +1638,19 @@ async def create_market_order(
             price=float(worst_price) if worst_price is not None else 0.0
         )
         
-        # Create and submit the market order
-        order = client.create_market_order(market_order_args)
+        # Step 1: Create and sign the market order
+        signed_order = client.create_market_order(market_order_args)
+        logger.info(f"Market order signed: {signed_order}")
         
-        logger.info(f"Market order created successfully: {order}")
+        # Step 2: POST the order to the exchange (this actually executes it!)
+        # Market orders use FOK (Fill or Kill) by default
+        result = client.post_order(signed_order)
+        
+        logger.info(f"Market order executed successfully: {result}")
         return {
             "success": True,
-            "order": order,
-            "message": "Market order submitted successfully. Check 'order' for execution details."
+            "order": result,
+            "message": "Market order executed successfully"
         }
 
     except Exception as e:
