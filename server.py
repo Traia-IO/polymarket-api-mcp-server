@@ -2067,6 +2067,70 @@ async def get_positions(
         return {"error": str(e), "message": "Failed to get positions"}
 
 
+@mcp.tool()
+async def get_token_balance(
+    context: Context,
+    token_id: str,
+) -> Dict[str, Any]:
+    """
+    [TRADING] Get the on-chain balance of a specific conditional token.
+
+    Returns the exact number of shares held for a given token_id.
+    This is the ground truth — reads directly from the CTF contract,
+    not derived from trade history.
+
+    REQUIRES SESSION AUTH: Initialize session with X-Polymarket-Key header first.
+
+    Args:
+        context: MCP context (auto-injected by framework)
+        token_id: The conditional token ID to query balance for
+
+    Returns:
+        Dictionary with token_id, shares (float), and raw_balance (int)
+    """
+    try:
+        session_creds = get_session_credentials(context)
+
+        if not session_creds:
+            return {
+                "error": "No Polymarket credentials available",
+                "message": "Initialize session with X-Polymarket-Key header containing your Polymarket private key"
+            }
+
+        private_key, creds, sig_type, funder = session_creds
+        client = create_authenticated_clob_client(private_key, creds, sig_type, funder)
+
+        params = BalanceAllowanceParams(
+            asset_type=AssetType.CONDITIONAL,
+            token_id=token_id,
+            signature_type=sig_type,
+        )
+        result = client.get_balance_allowance(params)
+
+        if isinstance(result, dict):
+            balance_raw = int(result.get("balance", 0))
+        else:
+            balance_raw = 0
+
+        # Conditional tokens use 6 decimal places (same as USDC)
+        shares = balance_raw / 1e6
+
+        logger.info(
+            f"Token balance for {token_id[:20]}...: {shares:.6f} shares (raw={balance_raw})"
+        )
+
+        return {
+            "success": True,
+            "token_id": token_id,
+            "shares": shares,
+            "raw_balance": balance_raw,
+        }
+
+    except Exception as e:
+        logger.error(f"Error in get_token_balance: {e}")
+        return {"error": str(e), "message": "Failed to get token balance"}
+
+
 # ============================================================================
 # ADDITIONAL AUTHENTICATED ENDPOINTS
 # ============================================================================
