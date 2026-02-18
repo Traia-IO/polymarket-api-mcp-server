@@ -5,9 +5,200 @@ You are working on implementing the Polymarket API MCP (Model Context Protocol) 
 ## API Information
 
 - **API Name**: Polymarket API
-- **Documentation**: [https://docs.polymarket.com/](https://docs.polymarket.com/)
-- **Website**: [https://gamma-api.polymarket.com](https://gamma-api.polymarket.com)
-- **Authentication**: Not required
+- **Documentation**: [https://docs.polymarket.com/developers/gamma-markets-api/](https://docs.polymarket.com/developers/gamma-markets-api/)
+- **Website**: [https://pma.d402.net](https://pma.d402.net)
+- **Authentication**: Required - API key via `POLYMARKET_API_KEY` environment variable
+## 🔒 HTTP 402 Payment Protocol - Dual-Mode Operation
+
+This MCP server implements the **HTTP 402 Payment Required** protocol using the **traia_iatp.d402** module with dual-mode support:
+
+### Mode 1: Authenticated (Free Access)
+
+When a client provides their own Polymarket API API key:
+
+```
+Request Headers:
+  Authorization: Bearer CLIENT_API_KEY
+
+Flow:
+  1. Client connects with their Polymarket API API key
+  2. MCP server uses client's API key to call Polymarket API API
+  3. No payment required
+  4. Client pays Polymarket API directly (not the MCP server)
+```
+
+**Use Case**: Clients who already have a Polymarket API subscription/API key
+
+### Mode 2: Payment Required (Paid Access)
+
+When a client doesn't have their own API key but pays via x402/d402 protocol:
+
+```
+Request Headers:
+  X-PAYMENT: <base64_encoded_x402_payment>
+
+X402 Payment Header Format (created by x402.clients.base.create_payment_header()):
+  {
+    "x402Version": 1,
+    "scheme": "exact",
+    "network": "base-sepolia",
+    "payload": {
+      "signature": "0x...",
+      "authorization": {
+        "from": "0xCLIENT_ADDRESS",
+        "to": "0xSERVER_ADDRESS",
+        "value": "1000",  // atomic units (wei)
+        "validAfter": "1700000000",
+        "validBefore": "1700000300",
+        "nonce": "hex..."
+      }
+    }
+  }
+
+Flow:
+  1. Client creates EIP-3009 transferWithAuthorization signature
+  2. Client sends Payment header with encoded payment payload
+  3. MCP server verifies payment using traia_iatp.d402.facilitator
+  4. MCP server uses its INTERNAL Polymarket API API key to call the API
+  5. Client pays the MCP server (not Polymarket API)
+```
+
+**Use Case**: Pay-per-use clients without their own Polymarket API subscription
+
+### D402 Protocol Integration
+
+This server uses the **traia_iatp.d402** module which implements:
+- EIP-3009 transferWithAuthorization for gasless payments
+- Payment verification via IATP Settlement Facilitator
+- On-chain transaction verification
+- Multiple token support (USDC, TRAIA, etc.)
+
+**Dependencies** (already in pyproject.toml):
+- `traia-iatp>=0.1.27` - Provides d402 module
+- `web3>=6.15.0` - For blockchain verification
+
+### Implementation Pattern for Tools
+
+**For auto-generated tools** (from OpenAPI), the endpoint implementer will generate code like this:
+
+```python
+from traia_iatp.d402.mcp_middleware import EndpointPaymentInfo, verify_endpoint_payment
+
+@mcp.tool()
+async def your_tool_name(context: Context, param1: str) -> Dict[str, Any]:
+    """Your tool description."""
+    
+    # Get client's API key (if provided)
+    api_key = get_session_api_key(context)
+    
+    # If no API key, verify payment for this specific endpoint
+    if not api_key:
+        # Each endpoint has specific payment requirements
+        endpoint_payment = EndpointPaymentInfo(
+            settlement_token_address="0xUSDC...",  # From endpoint config
+            settlement_token_network="base-sepolia",  # From endpoint config
+            payment_price_float=0.001,  # From endpoint config
+            payment_price_wei="1000",  # From endpoint config
+            server_address="0xSERVER..."  # Server's payment address
+        )
+        
+        # Verify payment matches this endpoint's requirements
+        if not verify_endpoint_payment(context, endpoint_payment):
+            return {
+                "error": "Payment required or insufficient",
+                "code": 402,
+                "required_payment": {
+                    "token": "0xUSDC...",
+                    "network": "base-sepolia",
+                    "amount": 0.001
+                }
+            }
+    
+    # Dual-mode: determine which API key to use
+    if api_key:
+        # MODE 1: Use client's API key (free for client)
+        api_key_to_use = api_key
+    else:
+        # MODE 2: Use server's internal API key (client paid)
+        api_key_to_use = os.getenv("POLYMARKET_API_KEY")
+    
+    # Call API
+    headers = {"Authorization": f"Bearer {api_key_to_use}"}
+    response = requests.get("https://pma.d402.net/endpoint", headers=headers)
+    return response.json()
+```
+
+**Key points**:
+1. Each tool verifies payment against **its specific endpoint requirements**
+2. Different endpoints can have different tokens, networks, and prices
+3. Payment amount/token/network are verified per-endpoint
+4. The middleware just extracts payment payload globally
+
+### Middleware Chain
+
+The server has TWO middleware in sequence:
+
+1. **AuthMiddleware**: Extracts client's API key from Authorization header
+2. **D402MCPMiddleware**: Extracts and validates payment payload from Payment header
+
+### How Per-Endpoint Payment Works
+
+Unlike FastAPI where middleware can be applied per-route, FastMCP has global middleware.
+Therefore:
+
+1. **D402MCPMiddleware**: Extracts payment payload globally, stores in `context.state.payment_payload`
+2. **Each Tool**: Calls `verify_endpoint_payment()` with its specific requirements
+   - Verifies payment token matches endpoint's settlement token
+   - Verifies payment amount meets endpoint's price
+   - Verifies payment network matches endpoint's network
+
+**Result**: Different endpoints can accept different tokens, on different networks, at different prices!
+
+### Environment Variables
+
+**Required**:
+- `POLYMARKET_API_KEY`: Server's internal Polymarket API API key (used when clients pay via 402)
+- `SERVER_ADDRESS`: MCP server's payment address (where 402 payments are sent)
+
+**Required for Settlement (Production)**:
+- `MCP_OPERATOR_PRIVATE_KEY`: Private key for signing settlement attestations (proof of service completion)
+- `MCP_OPERATOR_ADDRESS`: Public address corresponding to operator private key (for verification)
+
+**Optional**:
+- `D402_FACILITATOR_URL`: Custom d402 facilitator URL (default: "https://facilitator.d402.net")
+- `D402_FACILITATOR_API_KEY`: API key for private facilitator
+- `D402_TESTING_MODE`: Set to "true" for local testing without settlement (default: "false")
+
+**Example .env file**:
+```bash
+# API Authentication (server's internal key for payment mode)
+POLYMARKET_API_KEY=your_polymarket-api_api_key_here
+
+# Server Payment Address (where 402 payments are received)
+SERVER_ADDRESS=0x1234567890123456789012345678901234567890
+
+# Operator Keys (for signing settlement attestations)
+MCP_OPERATOR_PRIVATE_KEY=0x1234567890abcdef...  # Keep secure!
+MCP_OPERATOR_ADDRESS=0x9876543210fedcba...      # Derived from private key
+
+# Optional: Custom facilitator
+D402_FACILITATOR_URL=https://facilitator.d402.net
+D402_FACILITATOR_API_KEY=facilitator_api_key
+
+# Optional: Testing mode (skip settlement for local dev)
+D402_TESTING_MODE=false  # Set to 'true' for testing without facilitator
+```
+
+**About Operator Keys**:
+- The operator signs settlement attestations after completing each paid request
+- Attestation proves: service was completed + output hash is valid
+- Can use the same key as SERVER_ADDRESS or a separate signing key
+- Required for on-chain settlement via IATP Settlement Layer
+
+**Note on Endpoint-Specific Configuration**:
+Each endpoint's payment requirements (token, network, price) are embedded in the tool code.
+These come from the endpoint configuration in the database/OpenAPI schema.
+
 
 ## Implementation Checklist
 
@@ -31,12 +222,12 @@ You are working on implementing the Polymarket API MCP (Model Context Protocol) 
 
 ### 2. Study the API Documentation
 
-First, thoroughly review the API documentation at https://docs.polymarket.com/ to understand:
+First, thoroughly review the API documentation at https://docs.polymarket.com/developers/gamma-markets-api/ to understand:
 - Available endpoints
 - Request/response formats
 - Rate limits
 - Error handling
-- Specific features and capabilities to expose as tools
+- Authentication method (API key placement in headers, query params, etc.)- Specific features and capabilities to expose as tools
 
 ### 3. Implement API Client Functions
 
@@ -52,6 +243,7 @@ def call_polymarket_api_api(endpoint: str, params: Dict[str, Any], api_key: str)
     base_url = "https://api.example.com/v1"  # TODO: Get actual base URL from docs
     
     headers = {
+"Authorization": f"Bearer {api_key}",  # Or "X-API-Key": api_key
 "Content-Type": "application/json"
     }
     
@@ -97,13 +289,16 @@ async def search_polymarket_api(
     Returns:
         Dictionary with search results
     """
+    api_key = get_session_api_key(context)
+    if not api_key:
+        return {"error": "No API key found. Please authenticate with Authorization: Bearer YOUR_API_KEY"}
     
     try:
         # The call_polymarket_api_api function already has retry logic
         results = call_polymarket_api_api(
             "search",  # TODO: Use actual endpoint
             {"q": query, "limit": limit},
-None)
+api_key)
         return {
             "status": "success",
             "results": results
@@ -223,11 +418,12 @@ After implementing tools, test them:
 
 3. Test with CrewAI:
    ```python
-from traia_iatp.mcp.traia_mcp_adapter import create_mcp_adapter
+from traia_iatp.mcp.traia_mcp_adapter import create_mcp_adapter_with_auth
    
-   # Standard connection (no authentication)
-   with create_mcp_adapter(
-       url="http://localhost:8000/mcp/"
+   # Authenticated connection
+   with create_mcp_adapter_with_auth(
+       url="http://localhost:8000/mcp/",
+       api_key="your-api-key"
    ) as tools:
        # Test your tools
        for tool in tools:
@@ -285,7 +481,7 @@ TODO: Add specific examples from the API docs
 
 ## Need Help?
 
-- Check the Polymarket API API documentation: https://docs.polymarket.com/
+- Check the Polymarket API API documentation: https://docs.polymarket.com/developers/gamma-markets-api/
 - Review the MCP specification: https://modelcontextprotocol.io
 - Look at other MCP server examples in the Traia-IO organization
 

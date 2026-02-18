@@ -37,6 +37,8 @@ PORT=8000
 STAGE=MAINNET
 LOG_LEVEL=INFO
 
+# API Authentication (server's internal key for payment mode)
+POLYMARKET_API_KEY=
 # D402 Payment Protocol Configuration
 SERVER_ADDRESS=
 MCP_OPERATOR_PRIVATE_KEY=
@@ -195,6 +197,32 @@ else
 fi
 
 # Step 5: Prompt for API key if required (only if not already set)
+if ! grep -q "^POLYMARKET_API_KEY=[^[:space:]]" .env; then
+    if [ -t 0 ]; then
+        echo ""
+        echo -e "${YELLOW}📝 Please enter your Polymarket API API key:${NC}"
+        echo -e "${YELLOW}   (This is the server's internal API key used when clients pay via 402)${NC}"
+        read -p "POLYMARKET_API_KEY: " API_KEY_VALUE
+        if [ -n "$API_KEY_VALUE" ]; then
+            if grep -q "^POLYMARKET_API_KEY=" .env; then
+                if [[ "$OSTYPE" == "darwin"* ]]; then
+                    sed -i '' "s|^POLYMARKET_API_KEY=.*|POLYMARKET_API_KEY=$API_KEY_VALUE|" .env
+                else
+                    sed -i "s|^POLYMARKET_API_KEY=.*|POLYMARKET_API_KEY=$API_KEY_VALUE|" .env
+                fi
+            else
+                echo "POLYMARKET_API_KEY=$API_KEY_VALUE" >> .env
+            fi
+            echo -e "${GREEN}✅ API key saved to .env${NC}"
+        else
+            echo -e "${YELLOW}⚠️  No API key provided. You can set it later in .env${NC}"
+        fi
+    else
+        echo -e "${YELLOW}⚠️  Non-interactive mode: Please set POLYMARKET_API_KEY in .env manually${NC}"
+    fi
+else
+    echo -e "${GREEN}✅ POLYMARKET_API_KEY already set in .env${NC}"
+fi
 
 echo ""
 echo -e "${GREEN}✅ .env file configured for local development!${NC}"

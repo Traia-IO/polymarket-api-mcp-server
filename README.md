@@ -1,18 +1,21 @@
 # Polymarket API MCP Server
 
-This is an MCP (Model Context Protocol) server that provides access to the Polymarket API API. It enables AI agents and LLMs to interact with Polymarket API through standardized tools.
+This is an MCP (Model Context Protocol) server that provides with authentication via Bearer tokens access to the Polymarket API API. It enables AI agents and LLMs to interact with Polymarket API through standardized tools.
 
 ## Features
 
 - 🔧 **MCP Protocol**: Built on the Model Context Protocol for seamless AI integration
 - 🌐 **Full API Access**: Provides tools for interacting with Polymarket API endpoints
+- 🔐 **Secure Authentication**: Supports API key authentication via Bearer tokens
+- 💳 **HTTP 402 Payment Protocol**: Dual-mode operation (authenticated or paid access)
+- 🔗 **D402 Integration**: Uses traia_iatp.d402 for blockchain payment verification
 - 🐳 **Docker Support**: Easy deployment with Docker and Docker Compose
 - ⚡ **Async Operations**: Built with FastMCP for efficient async handling
 
 ## API Documentation
 
-- **Polymarket API Website**: [https://gamma-api.polymarket.com](https://gamma-api.polymarket.com)
-- **API Documentation**: [https://docs.polymarket.com/](https://docs.polymarket.com/)
+- **Polymarket API Website**: [https://pma.d402.net](https://pma.d402.net)
+- **API Documentation**: [https://docs.polymarket.com/developers/gamma-markets-api/](https://docs.polymarket.com/developers/gamma-markets-api/)
 
 ## Available Tools
 
@@ -32,7 +35,12 @@ This server provides the following tools:
    cd polymarket-api-mcp-server
    ```
 
-2. Run with Docker:
+2. Set your API key:
+   ```bash
+   export POLYMARKET_API_KEY="your-api-key-here"
+   ```
+
+3. Run with Docker:
    ```bash
    ./run_local_docker.sh
    ```
@@ -41,6 +49,18 @@ This server provides the following tools:
 
 1. Create a `.env` file with your configuration:
    ```env
+# Server's internal API key (for payment mode)
+   POLYMARKET_API_KEY=your-api-key-here
+   
+   # Server payment address (for HTTP 402 protocol)
+   SERVER_ADDRESS=0x1234567890123456789012345678901234567890
+   
+   # Operator keys (for signing settlement attestations)
+   MCP_OPERATOR_PRIVATE_KEY=0x1234567890abcdef...
+   MCP_OPERATOR_ADDRESS=0x9876543210fedcba...
+   
+   # Optional: Testing mode (skip settlement for local dev)
+   D402_TESTING_MODE=false
 PORT=8000
    ```
 
@@ -58,7 +78,7 @@ PORT=8000
 
 2. Run the server:
    ```bash
-uv run python -m server
+POLYMARKET_API_KEY="your-api-key-here" uv run python -m server
    ```
 
 ## Usage
@@ -73,11 +93,12 @@ python mcp_health_check.py
 ### Using with CrewAI
 
 ```python
-from traia_iatp.mcp.traia_mcp_adapter import create_mcp_adapter
+from traia_iatp.mcp.traia_mcp_adapter import create_mcp_adapter_with_auth
 
-# Connect to the MCP server
-with create_mcp_adapter(
-    url="http://localhost:8000/mcp/"
+# Connect with authentication
+with create_mcp_adapter_with_auth(
+    url="http://localhost:8000/mcp/",
+    api_key="your-api-key"
 ) as tools:
     # Use the tools
     for tool in tools:
@@ -87,6 +108,100 @@ with create_mcp_adapter(
     result = await tool.example_tool(query="test")
     print(result)
 ```
+
+## Authentication & Payment (HTTP 402 Protocol)
+
+This server supports **two modes of operation**:
+
+### Mode 1: Authenticated Access (Free)
+
+Clients with their own Polymarket API API key can use the server for free:
+
+```bash
+# Request with client's API key
+curl -X POST http://localhost:8000/mcp \
+  -H "Authorization: Bearer CLIENT_POLYMARKET_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"method":"tools/call","params":{"name":"example_tool","arguments":{"query":"test"}}}'
+```
+
+**Flow**:
+1. Client provides their Polymarket API API key
+2. Server uses client's API key to call Polymarket API API
+3. No payment required
+4. Client pays Polymarket API directly
+
+### Mode 2: Payment Required (Paid Access)
+
+Clients without an API key can pay-per-use via HTTP 402 protocol:
+
+```bash
+# Request with payment proof (x402/d402 protocol)
+curl -X POST http://localhost:8000/mcp \
+  -H "X-PAYMENT: <base64_encoded_x402_payment>" \
+  -H "Content-Type: application/json" \
+  -d '{"method":"tools/call","params":{"name":"example_tool","arguments":{"query":"test"}}}'
+```
+
+**Flow**:
+1. Client makes initial request without payment
+2. Server returns HTTP 402 with PaymentRequirements (token, network, amount)
+3. Client creates EIP-3009 transferWithAuthorization payment signature
+4. Client base64-encodes payment and sends in X-PAYMENT header
+5. Server verifies payment via traia_iatp.d402.mcp_middleware
+6. Server uses its INTERNAL Polymarket API API key to call the API
+7. Client receives result
+
+### D402 Protocol Details
+
+This server uses the **traia_iatp.d402** module for payment verification:
+
+- **Payment Method**: EIP-3009 transferWithAuthorization (gasless)
+- **Supported Tokens**: USDC, TRAIA, or any ERC20 token
+- **Default Price**: $0.001 per request (configurable via `DEFAULT_PRICE_USD`)
+- **Networks**: Base Sepolia, Sepolia, Polygon, etc.
+- **Facilitator**: d402.org (public) or custom facilitator
+
+### Environment Variables for Payment Mode
+
+```bash
+# Required
+POLYMARKET_API_KEY=your_internal_polymarket-api_api_key  # Server's API key (for payment mode)
+SERVER_ADDRESS=0x1234567890123456789012345678901234567890  # Server's payment address
+
+# Required for Settlement (Production)
+MCP_OPERATOR_PRIVATE_KEY=0x1234...  # Private key for signing settlement attestations
+MCP_OPERATOR_ADDRESS=0x5678...      # Operator's public address (for verification)
+
+# Optional
+D402_FACILITATOR_URL=https://facilitator.d402.net  # Facilitator service URL
+D402_FACILITATOR_API_KEY=your_key  # For private facilitator
+D402_TESTING_MODE=false  # Set to 'true' for local testing without settlement
+```
+
+**Operator Keys**:
+- **MCP_OPERATOR_PRIVATE_KEY**: Used to sign settlement attestations (proof of service completion)
+- **MCP_OPERATOR_ADDRESS**: Public address corresponding to the private key
+- Required for on-chain settlement via IATP Settlement Layer
+- Can be the same as SERVER_ADDRESS or a separate operator key
+
+**Note on Per-Endpoint Configuration**:
+Each endpoint's payment requirements (token address, network, price) are embedded in the tool code.
+They come from the endpoint configuration when the server is generated.
+
+### How It Works
+
+1. **Client Decision**:
+   - Has Polymarket API API key? → Mode 1 (Authenticated)
+   - No API key but willing to pay? → Mode 2 (Payment)
+
+2. **Server Response**:
+   - Mode 1: Uses client's API key (free for client)
+   - Mode 2: Uses server's API key (client pays server)
+
+3. **Business Model**:
+   - Mode 1: No revenue (passthrough)
+   - Mode 2: Revenue from pay-per-use (monetize server's API subscription)
 
 
 ## Development
@@ -117,8 +232,10 @@ The `deployment_params.json` file contains the deployment configuration for this
   "github_url": "https://github.com/Traia-IO/polymarket-api-mcp-server",
   "mcp_server": {
     "name": "polymarket-api-mcp",
-    "description": "Polymarket prediction market api - access market data, prices, probabilities, and trading for prediction markets",
+    "description": "Polymarket crypto data api",
     "server_type": "streamable-http",
+"requires_api_key": true,
+    "api_key_header": "Authorization",
 "capabilities": [
       // List all implemented tool names here
       "example_tool"
@@ -147,11 +264,12 @@ This server is designed to be deployed on Google Cloud Run. The deployment will:
 - `PORT`: Server port (default: 8000)
 - `STAGE`: Environment stage (default: MAINNET, options: MAINNET, TESTNET)
 - `LOG_LEVEL`: Logging level (default: INFO)
-
+- `POLYMARKET_API_KEY`: Your Polymarket API API key (required)
 ## Troubleshooting
 
 1. **Server not starting**: Check Docker logs with `docker logs <container-id>`
-2. **Connection errors**: Ensure the server is running on the expected port3. **Tool errors**: Check the server logs for detailed error messages
+2. **Authentication errors**: Ensure your API key is correctly set in the environment
+3. **API errors**: Verify your API key has the necessary permissions3. **Tool errors**: Check the server logs for detailed error messages
 
 ## Contributing
 

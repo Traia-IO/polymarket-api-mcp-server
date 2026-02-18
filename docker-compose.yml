@@ -10,7 +10,9 @@ services:
       - PORT=8000
       - STAGE=${STAGE:-MAINNET}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
-      # D402 Payment Protocol Configuration
+      # API Authentication (server's internal key for payment mode)
+      # Set this in .env file when deploying (creator provides their master API key)
+      - POLYMARKET_API_KEY=${POLYMARKET_API_KEY}      # D402 Payment Protocol Configuration
       - SERVER_ADDRESS=${SERVER_ADDRESS:-}
       - MCP_OPERATOR_PRIVATE_KEY=${MCP_OPERATOR_PRIVATE_KEY:-}  # For signing settlement attestations
       - MCP_OPERATOR_ADDRESS=${MCP_OPERATOR_ADDRESS:-}  # Operator's public address (for verification)
