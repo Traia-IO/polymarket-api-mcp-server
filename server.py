@@ -3253,7 +3253,7 @@ def create_app_with_middleware():
     logger.info("✅ Added PolymarketAuthMiddleware (session-based credential caching)")
     
     # Add health check endpoint (bypasses middleware)
-    @app.route("/health", methods=["GET"])
+    # Starlette uses add_route(), not @app.route() (Flask-style)
     async def health_check(request: Request) -> JSONResponse:
         """Health check endpoint for container orchestration.
         
@@ -3282,8 +3282,10 @@ def create_app_with_middleware():
                 "timestamp": datetime.now().isoformat()
             }
         )
+    from starlette.routing import Route
+    app.routes.append(Route("/health", health_check, methods=["GET"]))
     logger.info("✅ Added /health endpoint with geoblock check")
-    
+
     return app
 
 if __name__ == "__main__":
