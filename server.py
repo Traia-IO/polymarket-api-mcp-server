@@ -30,8 +30,8 @@ from dotenv import load_dotenv
 import uvicorn
 
 # Polymarket CLOB client for trading operations
-from py_clob_client.client import ClobClient
-from py_clob_client.clob_types import ApiCreds, BalanceAllowanceParams, AssetType
+from py_clob_client_v2.client import ClobClient
+from py_clob_client_v2.clob_types import ApiCreds, BalanceAllowanceParams, AssetType
 
 load_dotenv()
 
@@ -1367,7 +1367,7 @@ async def get_trades(
         client = create_authenticated_clob_client(private_key, creds, sig_type, funder)
         
         # Use py-clob-client to get trades
-        from py_clob_client.clob_types import TradeParams
+        from py_clob_client_v2.clob_types import TradeParams
         
         params = TradeParams()
         if token_id:
@@ -1530,8 +1530,8 @@ async def create_order(
         client = create_authenticated_clob_client(private_key, creds, sig_type, funder)
         
         # Build and submit order using OrderArgs
-        from py_clob_client.clob_types import OrderArgs
-        from py_clob_client.order_builder.constants import BUY, SELL
+        from py_clob_client_v2.clob_types import OrderArgs
+        from py_clob_client_v2.order_builder.constants import BUY, SELL
         order_side = BUY if side.upper() == "BUY" else SELL
         
         # Create OrderArgs object
@@ -1623,8 +1623,8 @@ async def create_market_order(
         client = create_authenticated_clob_client(private_key, creds, sig_type, funder)
         
         # Build market order args
-        from py_clob_client.clob_types import MarketOrderArgs
-        from py_clob_client.order_builder.constants import BUY, SELL
+        from py_clob_client_v2.clob_types import MarketOrderArgs
+        from py_clob_client_v2.order_builder.constants import BUY, SELL
         
         order_side = BUY if side.upper() == "BUY" else SELL
         
@@ -1771,7 +1771,7 @@ async def get_orders(
         client = create_authenticated_clob_client(private_key, creds, sig_type, funder)
         
         # Get orders with optional filters
-        from py_clob_client.clob_types import OpenOrderParams
+        from py_clob_client_v2.clob_types import OpenOrderParams
         if asset_id:
             params = OpenOrderParams(asset_id=asset_id)
             orders = client.get_orders(params)
@@ -1914,7 +1914,7 @@ async def get_balance(
         cash_amount = float(usdc_raw) / 1e6 if usdc_raw else 0.0  # USDC has 6 decimals
         
         # 2. Get all positions to calculate portfolio value
-        from py_clob_client.clob_types import TradeParams
+        from py_clob_client_v2.clob_types import TradeParams
         trades_response = client.get_trades(TradeParams())
         
         # Parse positions and calculate portfolio value
@@ -2371,7 +2371,7 @@ async def update_balance_allowance(
         client = create_authenticated_clob_client(private_key, creds, sig_type, funder)
         
         # Update balance allowance with proper params
-        from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
+        from py_clob_client_v2.clob_types import BalanceAllowanceParams, AssetType
         params = BalanceAllowanceParams(
             asset_type=AssetType.COLLATERAL,  # type: ignore  # USDC
             signature_type=sig_type  # Use session signature type
@@ -2561,8 +2561,8 @@ async def post_orders(
         if not isinstance(orders_data, list):
             return {"error": "orders_json must be a JSON array", "message": "Invalid input format"}
         
-        from py_clob_client.clob_types import OrderArgs
-        from py_clob_client.order_builder.constants import BUY, SELL
+        from py_clob_client_v2.clob_types import OrderArgs
+        from py_clob_client_v2.order_builder.constants import BUY, SELL
         
         # Build signed orders
         signed_orders = []

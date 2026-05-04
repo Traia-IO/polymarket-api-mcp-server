@@ -13,7 +13,11 @@ dependencies = [
     "traia-iatp>=0.1.95",  # For d402 payment protocol and RPC fallback support
     "uvicorn>=0.37.0",
     "web3>=6.15.0",  # For blockchain payment verification
-    "py-clob-client>=0.17.0",  # Polymarket CLOB client
+    # Polymarket CLOB v2 client (CLOB v2 cutover happened 2026-04-28 11:00 UTC).
+    # The legacy `py-clob-client` returns `order_version_mismatch` on every
+    # POST since the cutover. v2 stable (1.0.0) still has signing bugs per
+    # upstream issue #32; 1.0.1rc1 is the working release for sig_type=2 wallets.
+    "py-clob-client-v2==1.0.1rc1",
 ]
 
 [build-system]
