@@ -407,9 +407,14 @@ def derive_polymarket_credentials_internal(
             funder=funder_address
         )
         
-        # Use create_or_derive_api_creds as recommended by Polymarket docs
-        # This creates a new key if none exists, or derives existing one
-        creds = temp_client.create_or_derive_api_creds()
+        # Create or derive the L2 API credentials. v2 SDK renamed this from
+        # `create_or_derive_api_creds` (v1) to `create_or_derive_api_key` —
+        # singular, drops the "creds" suffix. Calling the old name on v2
+        # raised AttributeError, which was caught and logged at the dispatch
+        # layer but never surfaced; result was every authenticated tool call
+        # returning "No Polymarket credentials available" (no orders placed
+        # for ~17h after the v2 deploy on 2026-05-04 13:24 UTC).
+        creds = temp_client.create_or_derive_api_key()
         
         logger.info(f"✅ Derived Polymarket credentials (sig_type={signature_type}, funder={funder_address[:10]}...)")
         return creds
@@ -509,7 +514,7 @@ def create_authenticated_clob_client(
         )
         
         # Use create_or_derive as recommended by Polymarket docs
-        creds = temp_client.create_or_derive_api_creds()
+        creds = temp_client.create_or_derive_api_key()
     
     # Create the full client with credentials
     client = ClobClient(
@@ -590,7 +595,7 @@ async def derive_polymarket_credentials(
         
         # Use create_or_derive_api_creds as recommended by Polymarket docs
         # This creates a new key if none exists, or derives existing one
-        api_creds = client.create_or_derive_api_creds()
+        api_creds = client.create_or_derive_api_key()
         
         logger.info(f"Successfully derived Polymarket credentials for {funder_address[:10]}...")
         
@@ -1705,7 +1710,7 @@ async def cancel_order(
         client = create_authenticated_clob_client(private_key, creds, sig_type, funder)
         
         # Cancel the order
-        result = client.cancel(order_id)
+        result = client.cancel_order(order_id)
         
         logger.info(f"Order {order_id} cancelled successfully")
         return {
@@ -1774,9 +1779,9 @@ async def get_orders(
         from py_clob_client_v2.clob_types import OpenOrderParams
         if asset_id:
             params = OpenOrderParams(asset_id=asset_id)
-            orders = client.get_orders(params)
+            orders = client.get_open_orders(params)
         else:
-            orders = client.get_orders()
+            orders = client.get_open_orders()
         
         return {
             "success": True,
