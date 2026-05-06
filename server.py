@@ -1709,8 +1709,13 @@ async def cancel_order(
         private_key, creds, sig_type, funder = session_creds
         client = create_authenticated_clob_client(private_key, creds, sig_type, funder)
         
-        # Cancel the order
-        result = client.cancel_order(order_id)
+        # Cancel the order. v2 SDK changed the signature: cancel_order now
+        # takes an OrderPayload object (with .orderID attribute), not a bare
+        # string. Calling client.cancel_order(order_id) on v2 raises
+        # AttributeError("'str' object has no attribute 'orderID'") inside
+        # the SDK and fails the cancel.
+        from py_clob_client_v2.clob_types import OrderPayload
+        result = client.cancel_order(OrderPayload(orderID=order_id))
         
         logger.info(f"Order {order_id} cancelled successfully")
         return {
