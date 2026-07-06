@@ -18,6 +18,10 @@ dependencies = [
     # POST since the cutover. v2 stable (1.0.0) still has signing bugs per
     # upstream issue #32; 1.0.1rc1 is the working release for sig_type=2 wallets.
     "py-clob-client-v2==1.0.1rc1",
+    # Unified Polymarket SDK — drives the CLOB V2 deposit-wallet flow (pUSD
+    # collateral, V2 exchange, POLY_1271 signing) that py-clob-client-v2 can't.
+    # Used for signature_type=3 (deposit wallet) orders. See deposit_wallet.py.
+    "polymarket-client==0.1.0b13",
 ]
 
 [build-system]
@@ -31,4 +35,5 @@ allow-direct-references = true
 include = [
     "server.py",
     "mcp_health_check.py",
+    "deposit_wallet.py",
 ] 

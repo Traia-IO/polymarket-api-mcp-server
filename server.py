@@ -130,10 +130,13 @@ class SessionCredentialStore:
     def store(
         self,
         session_id: str,
-        creds: ApiCreds,
+        creds: Optional[ApiCreds],
         private_key: str,
         signature_type: int = 0,
-        funder_address: Optional[str] = None
+        funder_address: Optional[str] = None,
+        builder_key: Optional[str] = None,
+        builder_secret: Optional[str] = None,
+        builder_passphrase: Optional[str] = None,
     ) -> None:
         """
         Store credentials for a session.
@@ -150,9 +153,12 @@ class SessionCredentialStore:
                 "creds": creds,
                 "key": private_key,
                 "signature_type": signature_type,
-                "funder_address": funder_address
+                "funder_address": funder_address,
+                "builder_key": builder_key,
+                "builder_secret": builder_secret,
+                "builder_passphrase": builder_passphrase,
             }
-            logger.info(f"🔐 Stored Polymarket credentials for session {session_id[:8]}... (sig_type={signature_type})")
+            logger.info(f"🔐 Stored Polymarket credentials for session {session_id[:8]}... (sig_type={signature_type}, builder={'yes' if builder_key else 'no'})")
     
     def get(self, session_id: str) -> Optional[Dict[str, Any]]:
         """Get credentials for a session."""
@@ -315,7 +321,10 @@ class PolymarketAuthMiddleware(BaseHTTPMiddleware):
         polymarket_key = None
         signature_type = 2  # Default to GNOSIS_SAFE
         funder_address = None
-        
+        # Builder API key (key/secret/passphrase) — required for the CLOB V2
+        # deposit-wallet flow (signature_type=3) to sign gasless wallet ops.
+        builder_key = builder_secret = builder_passphrase = None
+
         # OPTION 1: Single JSON header (preferred for IATP)
         polymarket_auth = request.headers.get("X-Polymarket-Auth")
         if polymarket_auth:
@@ -324,22 +333,30 @@ class PolymarketAuthMiddleware(BaseHTTPMiddleware):
                 polymarket_key = auth_config.get("key")
                 signature_type = auth_config.get("signature_type", 2)
                 funder_address = auth_config.get("funder")
+                builder_key = auth_config.get("builder_key")
+                builder_secret = auth_config.get("builder_secret")
+                builder_passphrase = auth_config.get("builder_passphrase")
                 logger.debug(f"Parsed X-Polymarket-Auth JSON header")
             except json.JSONDecodeError as e:
                 logger.warning(f"Failed to parse X-Polymarket-Auth as JSON: {e}")
-        
+
         # OPTION 2: Multiple headers (fallback)
         if not polymarket_key:
             polymarket_key = request.headers.get("X-Polymarket-Key")
             sig_type_str = request.headers.get("X-Polymarket-Signature-Type", "2")
             funder_address = request.headers.get("X-Polymarket-Funder") or funder_address
-            
+
             try:
                 signature_type = int(sig_type_str)
-                if signature_type not in [0, 1, 2]:
+                # 3 = POLY_1271 (CLOB V2 deposit wallet). 0=EOA,1=POLY_PROXY,2=GNOSIS_SAFE.
+                if signature_type not in [0, 1, 2, 3]:
                     signature_type = 2
             except ValueError:
                 signature_type = 2
+        # Builder creds from individual headers (both auth paths fall through here).
+        builder_key = builder_key or request.headers.get("X-Polymarket-Builder-Key")
+        builder_secret = builder_secret or request.headers.get("X-Polymarket-Builder-Secret")
+        builder_passphrase = builder_passphrase or request.headers.get("X-Polymarket-Builder-Passphrase")
         
         if polymarket_key and session_id:
             # Only derive if we don't already have credentials for this session
@@ -347,16 +364,30 @@ class PolymarketAuthMiddleware(BaseHTTPMiddleware):
                 try:
                     from eth_account import Account
                     account = Account.from_key(polymarket_key)
-                    
-                    # If no funder address provided, use EOA
-                    if not funder_address:
-                        funder_address = account.address
-                        if signature_type != 0:
-                            logger.warning(f"⚠️  No funder provided for sig_type={signature_type}. Using EOA. This may cause signature errors for Polymarket.com accounts.")
-                    
-                    logger.info(f"🔑 Polymarket auth for session {session_id[:8]}... (sig_type={signature_type}, funder={funder_address[:10]}...)")
-                    creds = derive_polymarket_credentials_internal(polymarket_key, signature_type, funder_address)
-                    session_credential_store.store(session_id, creds, polymarket_key, signature_type, funder_address)
+
+                    if signature_type == 3:
+                        # CLOB V2 deposit-wallet flow: the unified `polymarket` SDK
+                        # derives its own creds + the deposit wallet from the owner
+                        # key + Builder API key. py-clob-client-v2 can't sign
+                        # POLY_1271, so skip its derivation and just cache the raw
+                        # material the deposit_wallet module needs.
+                        if not (builder_key and builder_secret and builder_passphrase):
+                            logger.error("⚠️ sig_type=3 (deposit wallet) requires Builder API key headers; none provided")
+                        logger.info(f"🔑 Polymarket V2 deposit-wallet session {session_id[:8]}... (sig_type=3, builder={'yes' if builder_key else 'NO'})")
+                        session_credential_store.store(
+                            session_id, None, polymarket_key, 3, funder_address,
+                            builder_key, builder_secret, builder_passphrase,
+                        )
+                    else:
+                        # If no funder address provided, use EOA
+                        if not funder_address:
+                            funder_address = account.address
+                            if signature_type != 0:
+                                logger.warning(f"⚠️  No funder provided for sig_type={signature_type}. Using EOA. This may cause signature errors for Polymarket.com accounts.")
+
+                        logger.info(f"🔑 Polymarket auth for session {session_id[:8]}... (sig_type={signature_type}, funder={funder_address[:10]}...)")
+                        creds = derive_polymarket_credentials_internal(polymarket_key, signature_type, funder_address)
+                        session_credential_store.store(session_id, creds, polymarket_key, signature_type, funder_address)
                 except Exception as e:
                     logger.error(f"Failed to derive Polymarket credentials: {e}")
                     # Continue with the request even if credential derivation fails
@@ -464,6 +495,32 @@ def get_session_credentials(context: Context) -> Optional[Tuple[str, ApiCreds, i
         import traceback
         logger.error(traceback.format_exc())
     return None
+
+
+def get_session_deposit_client(context: Context):
+    """For CLOB V2 deposit-wallet sessions (signature_type == 3), return a
+    DepositWalletClient built from the session's owner key + Builder API key.
+    Returns None if the session isn't a deposit wallet or is missing the builder
+    key. The unified-SDK client is cached per key inside deposit_wallet."""
+    try:
+        if not (hasattr(context, "request_context") and context.request_context
+                and hasattr(context.request_context, "request") and context.request_context.request):
+            return None
+        session_id = context.request_context.request.headers.get("mcp-session-id")
+        if not session_id:
+            return None
+        stored = session_credential_store.get(session_id)
+        if not stored or stored.get("signature_type") != 3:
+            return None
+        bk, bs, bp = stored.get("builder_key"), stored.get("builder_secret"), stored.get("builder_passphrase")
+        if not (bk and bs and bp):
+            logger.error("⚠️ deposit-wallet session missing Builder API key")
+            return None
+        from deposit_wallet import get_deposit_client
+        return get_deposit_client(stored["key"], bk, bs, bp)
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"Error building deposit-wallet client: {e}")
+        return None
 
 
 # ============================================================================
@@ -1625,8 +1682,19 @@ async def create_market_order(
             }
         
         private_key, creds, sig_type, funder = session_creds
+
+        # CLOB V2 deposit-wallet flow (POLY_1271). py-clob-client-v2 can't sign
+        # these; route to the unified SDK. BUY amount=USDC, SELL amount=shares;
+        # worst_price -> tick-rounded max/min price.
+        if sig_type == 3:
+            dw = get_session_deposit_client(context)
+            if dw is None:
+                return {"error": "deposit-wallet session missing Builder API key",
+                        "message": "Provide X-Polymarket-Builder-Key/Secret/Passphrase for signature_type=3"}
+            return dw.create_market_order(str(token_id), side, float(amount), worst_price)
+
         client = create_authenticated_clob_client(private_key, creds, sig_type, funder)
-        
+
         # Build market order args
         from py_clob_client_v2.clob_types import MarketOrderArgs
         from py_clob_client_v2.order_builder.constants import BUY, SELL
@@ -1707,8 +1775,16 @@ async def cancel_order(
             }
         
         private_key, creds, sig_type, funder = session_creds
+
+        # CLOB V2 deposit wallet: cancel via the unified SDK.
+        if sig_type == 3:
+            dw = get_session_deposit_client(context)
+            if dw is None:
+                return {"success": False, "error": "deposit-wallet session missing Builder API key"}
+            return dw.cancel_order(str(order_id))
+
         client = create_authenticated_clob_client(private_key, creds, sig_type, funder)
-        
+
         # Cancel the order. v2 SDK changed the signature: cancel_order now
         # takes an OrderPayload object (with .orderID attribute), not a bare
         # string. Calling client.cancel_order(order_id) on v2 raises
@@ -1909,8 +1985,28 @@ async def get_balance(
             }
         
         private_key, creds, sig_type, funder = session_creds
+
+        # CLOB V2 deposit wallet: read pUSD collateral via the unified SDK.
+        if sig_type == 3:
+            dw = get_session_deposit_client(context)
+            if dw is None:
+                return {"success": False, "error": "deposit-wallet session missing Builder API key"}
+            bal = dw.get_collateral_balance()
+            if bal is None:
+                return {"success": False, "error": "collateral balance unavailable"}
+            return {
+                "success": True,
+                # top-level fields for PolymarketClient.get_usdc_balance() probing
+                "balance": bal, "cash": bal, "usdc": bal,
+                "cash_balance": {"amount": bal, "formatted": f"${bal:.2f}"},
+                "portfolio_balance": {"amount": 0.0, "formatted": "$0.00"},
+                "total_balance": {"amount": bal, "formatted": f"${bal:.2f}"},
+                "positions": [],
+                "message": f"Cash: ${bal:.2f} (V2 deposit wallet)",
+            }
+
         client = create_authenticated_clob_client(private_key, creds, sig_type, funder)
-        
+
         # 1. Get COLLATERAL (USDC cash) balance - "Cash Balance" in Polymarket UI
         cash_params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL, signature_type=sig_type)  # type: ignore
         cash_balance = client.get_balance_allowance(cash_params)
@@ -2061,11 +2157,20 @@ async def get_positions(
             }
         
         private_key, creds, sig_type, funder = session_creds
+
+        # CLOB V2 deposit wallet: open positions via data-api.
+        if sig_type == 3:
+            dw = get_session_deposit_client(context)
+            if dw is None:
+                return {"success": False, "error": "deposit-wallet session missing Builder API key"}
+            positions = dw.get_positions()
+            return {"success": True, "positions": positions, "message": "Deposit-wallet positions retrieved"}
+
         client = create_authenticated_clob_client(private_key, creds, sig_type, funder)
-        
+
         # Get trades which show positions
         trades = client.get_trades()
-        
+
         return {
             "success": True,
             "trades": trades,
@@ -2108,6 +2213,15 @@ async def get_token_balance(
             }
 
         private_key, creds, sig_type, funder = session_creds
+
+        # CLOB V2 deposit wallet: shares held via data-api (SDK CONDITIONAL query lags).
+        if sig_type == 3:
+            dw = get_session_deposit_client(context)
+            if dw is None:
+                return {"success": False, "error": "deposit-wallet session missing Builder API key"}
+            shares = dw.get_token_balance(str(token_id))
+            return {"success": True, "token_id": token_id, "shares": shares, "raw_balance": int(shares * 1e6)}
+
         client = create_authenticated_clob_client(private_key, creds, sig_type, funder)
 
         params = BalanceAllowanceParams(

@@ -51,7 +51,7 @@ RUN if [ -d .docker-iatp/IATP ]; then \
 # - Local mode: pyproject.toml references file:///tmp/IATP (set by run_local_docker.sh)
 # - Remote mode: pyproject.toml references traia-iatp>=0.1.27 (from template)
 RUN uv venv .venv && \
-    uv pip install -r pyproject.toml
+    uv pip install --prerelease=allow -r pyproject.toml
 
 # Set environment variables
 ENV PATH="/app/.venv/bin:$PATH"
