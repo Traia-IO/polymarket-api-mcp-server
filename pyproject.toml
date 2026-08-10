@@ -5,7 +5,10 @@ description = "MCP server for Polymarket API API with  authentication and  HTTP 
 requires-python = ">=3.12"
 dependencies = [
     "anyio>=4.0.0",
-    "mcp>=1.1.2",
+    # Pin below mcp 2.x: FastMCP lives at mcp.server.fastmcp in 1.x only.
+    # mcp 2.0.0 (2026-07-28) removed that module; floating >=1.1.2 broke
+    # Cloud Run cold starts when CMD used `uv run` (re-resolved at runtime).
+    "mcp>=1.1.2,<2",
     "python-dotenv>=1.1.1",
     "requests>=2.32.5",
     "starlette>=0.45.0",

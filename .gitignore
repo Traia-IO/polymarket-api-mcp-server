@@ -54,7 +54,6 @@ htmlcov/
 .hypothesis/
 
 # Package managers
-uv.lock
 poetry.lock
 pip-log.txt
 

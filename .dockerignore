@@ -38,10 +38,8 @@ Thumbs.db
 *.tmp
 .cache/
 
-# uv
-uv.lock
-
 # Docker
-Dockerfile
+# Keep uv.lock in the build context — Dockerfile uses `uv sync --frozen`
+# so cold starts never re-resolve deps against PyPI.
 docker-compose.yml
 .dockerignore 
